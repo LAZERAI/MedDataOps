@@ -1,4 +1,3 @@
-from meddataops.env import MedDataOpsEnv
 from meddataops.models import AgentAction, EnvironmentState, ResetRequest, StepResult
 
 __all__ = [
@@ -8,3 +7,11 @@ __all__ = [
     "EnvironmentState",
     "StepResult",
 ]
+
+
+def __getattr__(name: str):
+    if name == "MedDataOpsEnv":
+        from meddataops.env import MedDataOpsEnv
+
+        return MedDataOpsEnv
+    raise AttributeError(f"module 'meddataops' has no attribute {name!r}")

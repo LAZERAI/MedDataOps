@@ -1,0 +1,46 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: meddataops-postgres
+    environment:
+      POSTGRES_DB: meddataops
+      POSTGRES_USER: meddataops
+      POSTGRES_PASSWORD: meddataops
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meddataops -d meddataops"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: meddataops-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      EMBEDDED_POSTGRES: "0"
+      UVICORN_RELOAD: "1"
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: meddataops
+      POSTGRES_USER: meddataops
+      POSTGRES_PASSWORD: meddataops
+      MEDDATAOPS_POSTGRES_DSN: postgresql://meddataops:meddataops@postgres:5432/meddataops
+      MEDDATAOPS_MAX_STEPS: "16"
+      PYTHONPATH: /app/src
+    ports:
+      - "7860:7860"
+    volumes:
+      - ./:/app
+
+volumes:
+  postgres_data:

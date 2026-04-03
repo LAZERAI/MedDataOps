@@ -4,13 +4,33 @@ WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app/src
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app/src \
+    PGDATA=/var/lib/postgresql/data \
+    POSTGRES_PORT=5432 \
+    POSTGRES_DB=meddataops \
+    POSTGRES_USER=meddataops \
+    POSTGRES_PASSWORD=meddataops \
+    POSTGRES_HOST=127.0.0.1 \
+    EMBEDDED_POSTGRES=1
 
-COPY requirements.txt .
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bash \
+        ca-certificates \
+        postgresql \
+        postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY openenv.yaml README.md inference.py .
-COPY src ./src
-COPY scripts ./scripts
+COPY . .
 
-CMD ["python", "scripts/run_env.py"]
+RUN mkdir -p /var/lib/postgresql/data /var/run/postgresql \
+    && chown -R postgres:postgres /var/lib/postgresql /var/run/postgresql \
+    && chmod +x /app/entrypoint.sh
+
+EXPOSE 7860
+
+ENTRYPOINT ["/app/entrypoint.sh"]

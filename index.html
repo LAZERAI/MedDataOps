@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MedDataOps</title>
+  <style>
+    :root {
+      --bg: #f4f7fb;
+      --card: #ffffff;
+      --ink: #10243f;
+      --muted: #4d617d;
+      --brand: #0f6dd9;
+      --brand-2: #1fa774;
+      --border: #dbe5f2;
+      --easy: #136f63;
+      --medium: #a06200;
+      --hard: #9f1239;
+      --shadow: 0 18px 50px rgba(16, 36, 63, 0.1);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Avenir Next", "Trebuchet MS", sans-serif;
+      background: radial-gradient(circle at 15% 15%, #dff3ff 0%, transparent 45%),
+                  radial-gradient(circle at 85% 0%, #ddf8ea 0%, transparent 45%),
+                  var(--bg);
+      color: var(--ink);
+    }
+
+    .wrap {
+      width: min(1120px, 92vw);
+      margin: 28px auto 44px;
+      display: grid;
+      gap: 18px;
+    }
+
+    .hero {
+      background: linear-gradient(125deg, #0f6dd9 0%, #1fa774 100%);
+      color: #f6fbff;
+      border-radius: 20px;
+      padding: 28px;
+      box-shadow: var(--shadow);
+    }
+
+    .hero h1 {
+      margin: 0 0 8px;
+      font-size: clamp(1.8rem, 3.2vw, 2.5rem);
+      line-height: 1.05;
+      letter-spacing: 0.2px;
+    }
+
+    .hero p {
+      margin: 6px 0;
+      max-width: 900px;
+      color: rgba(246, 251, 255, 0.96);
+      line-height: 1.45;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    @media (max-width: 920px) {
+      .grid-2 { grid-template-columns: 1fr; }
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      box-shadow: 0 6px 24px rgba(16, 36, 63, 0.06);
+      padding: 18px;
+    }
+
+    .card h2 {
+      margin: 0 0 12px;
+      font-size: 1.1rem;
+      color: #15345f;
+    }
+
+    .task-list {
+      display: grid;
+      gap: 10px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .task-item {
+      border: 1px solid #e6edf7;
+      border-radius: 12px;
+      padding: 12px;
+      background: #fcfeff;
+    }
+
+    .task-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 7px;
+    }
+
+    .task-id {
+      font-weight: 700;
+      color: #173761;
+    }
+
+    .badge {
+      font-size: 0.76rem;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      color: #fff;
+      border-radius: 999px;
+      padding: 4px 9px;
+      font-weight: 700;
+    }
+
+    .badge.easy { background: var(--easy); }
+    .badge.medium { background: var(--medium); }
+    .badge.hard { background: var(--hard); }
+
+    .muted {
+      color: var(--muted);
+      line-height: 1.4;
+      margin: 0;
+      font-size: 0.95rem;
+    }
+
+    .btn {
+      border: 0;
+      border-radius: 10px;
+      padding: 11px 14px;
+      background: linear-gradient(120deg, var(--brand) 0%, var(--brand-2) 100%);
+      color: #fff;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 8px 18px rgba(15, 109, 217, 0.22);
+    }
+
+    .btn:disabled {
+      cursor: not-allowed;
+      opacity: 0.7;
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+
+    pre {
+      margin: 0;
+      background: #0f1f33;
+      color: #d8e8ff;
+      border-radius: 12px;
+      padding: 12px;
+      overflow: auto;
+      max-height: 360px;
+      font-size: 0.84rem;
+      line-height: 1.45;
+      border: 1px solid #223a58;
+    }
+
+    code {
+      font-family: "Cascadia Mono", "Fira Code", Consolas, monospace;
+      font-size: 0.86rem;
+    }
+
+    .api-grid {
+      display: grid;
+      gap: 10px;
+    }
+
+    .api-item {
+      border: 1px dashed #c7d8ee;
+      border-radius: 10px;
+      padding: 10px;
+      background: #fbfdff;
+    }
+
+    .endpoint {
+      font-weight: 800;
+      color: #194574;
+      margin-bottom: 6px;
+    }
+
+    .ok {
+      color: #136f63;
+      font-weight: 700;
+    }
+
+    .warn {
+      color: #a06200;
+      font-weight: 700;
+    }
+
+    .footer-note {
+      color: #5b6f8f;
+      font-size: 0.9rem;
+      margin-top: 2px;
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="hero">
+      <h1>MedDataOps</h1>
+      <p>
+        OpenEnv-compatible RL environment for clinical data engineering.
+        Agents clean noisy hospital data and repair SQL across progressive task difficulty.
+      </p>
+      <p class="footer-note">Docker-based HuggingFace Space • API port 7860 • Session-aware HTTP runtime</p>
+    </section>
+
+    <section class="grid-2">
+      <article class="card">
+        <h2>Tasks</h2>
+        <ul id="task-list" class="task-list"></ul>
+      </article>
+
+      <article class="card">
+        <div class="row">
+          <h2 style="margin:0;">Live Demo Episode</h2>
+          <button id="demo-btn" class="btn">Run Demo Episode</button>
+        </div>
+        <p class="muted" style="margin-bottom:10px;">
+          This runs a hardcoded 3-step demo agent: <code>clean_data</code> → <code>fix_query</code> → <code>submit</code>.
+        </p>
+        <pre id="demo-output">Click "Run Demo Episode" to execute a sample interaction against /reset and /step.</pre>
+      </article>
+    </section>
+
+    <section class="grid-2">
+      <article class="card">
+        <h2>API Endpoints</h2>
+        <div class="api-grid">
+          <div class="api-item">
+            <div class="endpoint">POST /reset</div>
+            <p class="muted">Start or restart an episode. Optional body: <code>{"task_id":"triage_report"}</code>.</p>
+          </div>
+          <div class="api-item">
+            <div class="endpoint">POST /step</div>
+            <p class="muted">Send an action: <code>{"action_type":"run_query","parameters":{"query":"SELECT 1"}}</code>.</p>
+          </div>
+          <div class="api-item">
+            <div class="endpoint">GET /state</div>
+            <p class="muted">Get full current session state for the active episode.</p>
+          </div>
+          <div class="api-item">
+            <div class="endpoint">GET /health</div>
+            <p class="muted">Returns platform health payload with API version.</p>
+          </div>
+          <div class="api-item">
+            <div class="endpoint">GET /tasks</div>
+            <p class="muted">List all available tasks with metadata and hints.</p>
+          </div>
+        </div>
+      </article>
+
+      <article class="card">
+        <h2>Try It with curl</h2>
+        <pre><code># Set your Space URL first
+export SPACE_URL="https://&lt;your-space-name&gt;.hf.space"
+
+# 1) health
+curl -s "$SPACE_URL/health"
+
+# 2) tasks
+curl -s "$SPACE_URL/tasks"
+
+# 3) reset (save session id)
+SESSION_ID=$(curl -si -X POST "$SPACE_URL/reset" \
+  -H "Content-Type: application/json" \
+  -d '{"task_id":"triage_report"}' | sed -n 's/^X-Session-Id: //p' | tr -d '\r')
+
+# 4) step
+curl -s -X POST "$SPACE_URL/step" \
+  -H "Content-Type: application/json" \
+  -H "X-Session-Id: $SESSION_ID" \
+  -d '{"action_type":"submit","parameters":{}}'
+
+# 5) state
+curl -s "$SPACE_URL/state" -H "X-Session-Id: $SESSION_ID"</code></pre>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    const demoOutput = document.getElementById('demo-output');
+    const demoBtn = document.getElementById('demo-btn');
+    const taskList = document.getElementById('task-list');
+
+    let sessionId = localStorage.getItem('meddataops_session_id') || '';
+
+    const fallbackTasks = [
+      {
+        id: 'triage_report',
+        difficulty: 'easy',
+        description: 'Clean patient admissions data and repair a ward aggregation query.'
+      },
+      {
+        id: 'medication_summary',
+        difficulty: 'medium',
+        description: 'Normalize medications data and fix a broken patient-medication join.'
+      },
+      {
+        id: 'icu_capacity',
+        difficulty: 'hard',
+        description: 'Standardize merged ICU feeds and optimize a complex capacity query.'
+      }
+    ];
+
+    function renderTasks(tasks) {
+      const rows = tasks.length ? tasks : fallbackTasks;
+      taskList.innerHTML = rows.map(task => {
+        const difficulty = (task.difficulty || 'unknown').toLowerCase();
+        const badgeClass = ['easy', 'medium', 'hard'].includes(difficulty) ? difficulty : 'medium';
+        const hintText = Array.isArray(task.hints) && task.hints.length
+          ? `<p class="muted" style="margin-top:6px;">Hint: ${task.hints[0]}</p>`
+          : '';
+
+        return `
+          <li class="task-item">
+            <div class="task-top">
+              <span class="task-id">${task.id}</span>
+              <span class="badge ${badgeClass}">${difficulty}</span>
+            </div>
+            <p class="muted">${task.description || ''}</p>
+            ${hintText}
+          </li>
+        `;
+      }).join('');
+    }
+
+    async function apiFetch(path, options = {}) {
+      const headers = Object.assign({}, options.headers || {});
+      if (!headers['Content-Type'] && options.method && options.method !== 'GET') {
+        headers['Content-Type'] = 'application/json';
+      }
+      if (sessionId) {
+        headers['X-Session-Id'] = sessionId;
+      }
+
+      const res = await fetch(path, {
+        method: options.method || 'GET',
+        headers,
+        body: options.body,
+        credentials: 'include',
+      });
+
+      const returnedSession = res.headers.get('x-session-id');
+      if (returnedSession) {
+        sessionId = returnedSession;
+        localStorage.setItem('meddataops_session_id', sessionId);
+      }
+
+      const text = await res.text();
+      let data;
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch (_) {
+        data = { raw: text };
+      }
+
+      if (!res.ok) {
+        const detail = data && data.detail ? JSON.stringify(data.detail) : text || `HTTP ${res.status}`;
+        throw new Error(detail);
+      }
+      return data;
+    }
+
+    async function loadTasks() {
+      try {
+        const data = await apiFetch('/tasks');
+        renderTasks((data && data.tasks) || []);
+      } catch (err) {
+        renderTasks(fallbackTasks);
+      }
+    }
+
+    async function runDemoEpisode() {
+      demoBtn.disabled = true;
+      demoOutput.textContent = 'Running demo...';
+
+      try {
+        const transcript = [];
+        const reset = await apiFetch('/reset', {
+          method: 'POST',
+          body: JSON.stringify({ task_id: 'triage_report' }),
+        });
+
+        transcript.push({ step: 'reset', observation: reset, session_id: sessionId || null });
+
+        const actions = [
+          {
+            action_type: 'clean_data',
+            parameters: {
+              operations: [
+                { operation: 'normalize_strings', columns: ['ward'], case: 'upper' }
+              ]
+            }
+          },
+          {
+            action_type: 'fix_query',
+            parameters: {
+              query: "SELECT ward, COUNT(*) AS patient_count FROM patients WHERE admission_date >= DATE '2024-01-01' GROUP BY ward ORDER BY patient_count DESC, ward ASC"
+            }
+          },
+          {
+            action_type: 'submit',
+            parameters: {}
+          }
+        ];
+
+        for (let i = 0; i < actions.length; i += 1) {
+          const result = await apiFetch('/step', {
+            method: 'POST',
+            body: JSON.stringify(actions[i]),
+          });
+          transcript.push({ step: `step_${i + 1}`, action: actions[i], result });
+          if (result.done) {
+            break;
+          }
+        }
+
+        const state = await apiFetch('/state');
+        transcript.push({ step: 'state', state });
+
+        demoOutput.textContent = JSON.stringify(transcript, null, 2);
+      } catch (err) {
+        demoOutput.textContent = `Demo failed: ${err.message}`;
+      } finally {
+        demoBtn.disabled = false;
+      }
+    }
+
+    demoBtn.addEventListener('click', runDemoEpisode);
+    loadTasks();
+  </script>
+</body>
+</html>

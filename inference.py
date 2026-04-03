@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib
-import inspect
 import json
 import os
 import random
@@ -13,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from openai import APIConnectionError, APIError, APITimeoutError, OpenAI, RateLimitError
+from pydantic import BaseModel, Field
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -33,13 +33,18 @@ TASK_RUN_ORDER = [
     {"id": "icu_capacity", "aliases": ["hard"], "seed": 303},
 ]
 
-ALLOWED_ACTIONS = {"clean_data", "run_query", "fix_query", "submit"}
+ALLOWED_ACTIONS = {"clean_data", "run_query", "fix_query", "submit", "noop"}
 LEGACY_ACTION_MAP = {
     "clean_data": "clean_data",
     "run_query": "noop",
     "fix_query": "fix_sql",
+    "noop": "noop",
     "submit": "submit",
 }
+
+ACTION_TOKEN_BUDGET = 2000
+APPROX_CHARS_PER_TOKEN = 4
+ACTION_MESSAGE_CHAR_BUDGET = ACTION_TOKEN_BUDGET * APPROX_CHARS_PER_TOKEN
 
 SYSTEM_PROMPT = """You are a data engineer at a hospital analytics team. You have been given a messy dataset and a broken SQL query. Your job is to clean the data and fix the query so the report is accurate.
 
@@ -129,6 +134,11 @@ class TaskRunResult:
     elapsed_sec: float
 
 
+class ParsedAction(BaseModel):
+    action_type: str = Field(default="noop")
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+
 def _require_env(name: str) -> str:
     value = os.getenv(name)
     if value is None or not value.strip():
@@ -168,11 +178,83 @@ def _compact_rows(rows: Any, max_rows: int = 6) -> list[dict[str, Any]]:
     return compact
 
 
+def _is_nullish(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str) and not value.strip():
+        return True
+    return False
+
+
+def _truncate_string(value: Any, max_len: int = 220) -> str:
+    text = str(value)
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 3] + "..."
+
+
+def _compact_json_like(value: Any, *, max_items: int = 8, max_str_len: int = 220) -> Any:
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for idx, (k, v) in enumerate(value.items()):
+            if idx >= max_items:
+                result["..."] = f"truncated_{len(value) - max_items}_keys"
+                break
+            result[str(k)] = _compact_json_like(v, max_items=max_items, max_str_len=max_str_len)
+        return result
+    if isinstance(value, list):
+        compacted = [_compact_json_like(v, max_items=max_items, max_str_len=max_str_len) for v in value[:max_items]]
+        if len(value) > max_items:
+            compacted.append(f"truncated_{len(value) - max_items}_items")
+        return compacted
+    if isinstance(value, str):
+        return _truncate_string(value, max_len=max_str_len)
+    return value
+
+
+def _summarize_dataset(rows: Any, sample_rows: int = 3) -> dict[str, Any]:
+    if not isinstance(rows, list):
+        return {
+            "row_count": 0,
+            "column_names": [],
+            "null_count_per_column": {},
+            "sample_rows": [],
+        }
+
+    dict_rows = [row for row in rows if isinstance(row, dict)]
+    if not dict_rows:
+        return {
+            "row_count": len(rows),
+            "column_names": [],
+            "null_count_per_column": {},
+            "sample_rows": [],
+        }
+
+    column_names = sorted({key for row in dict_rows for key in row.keys()})
+    null_count_per_column: dict[str, int] = {}
+    for col in column_names:
+        null_count_per_column[col] = sum(
+            1 for row in dict_rows if (col not in row) or _is_nullish(row.get(col))
+        )
+
+    sample: list[dict[str, Any]] = []
+    for row in dict_rows[:sample_rows]:
+        sample.append(_compact_json_like(row, max_items=20, max_str_len=160))
+
+    return {
+        "row_count": len(rows),
+        "column_names": column_names,
+        "null_count_per_column": null_count_per_column,
+        "sample_rows": sample,
+    }
+
+
 def _normalize_observation(raw_observation: Any, task_id: str, step_number: int) -> dict[str, Any]:
     payload = _to_dict(raw_observation)
 
     if "current_dataset_state" in payload and "current_sql_query" in payload:
         rows = payload.get("current_dataset_state")
+        summary = _summarize_dataset(rows)
         return {
             "task_id": task_id,
             "step_number": int(payload.get("step_number", step_number)),
@@ -181,10 +263,12 @@ def _normalize_observation(raw_observation: Any, task_id: str, step_number: int)
             "error_messages": payload.get("error_messages", []),
             "dataset_preview": _compact_rows(rows),
             "dataset_preview_count": len(rows) if isinstance(rows, list) else 0,
+            "dataset_summary": summary,
         }
 
     dirty_rows = payload.get("dirty_rows", [])
     task_info = payload.get("task", {})
+    summary = _summarize_dataset(dirty_rows)
     return {
         "task_id": task_id,
         "step_number": int(payload.get("step_index", step_number)),
@@ -193,54 +277,208 @@ def _normalize_observation(raw_observation: Any, task_id: str, step_number: int)
         "error_messages": [payload.get("last_sql_error")] if payload.get("last_sql_error") else [],
         "dataset_preview": _compact_rows(dirty_rows),
         "dataset_preview_count": len(dirty_rows) if isinstance(dirty_rows, list) else 0,
+        "dataset_summary": summary,
     }
 
 
-def _extract_json_block(text: str) -> dict[str, Any]:
-    text = (text or "").strip()
-    if not text:
-        return {}
-
-    try:
-        loaded = json.loads(text)
-        if isinstance(loaded, dict):
-            return loaded
-    except json.JSONDecodeError:
-        pass
-
-    start_idx = text.find("{")
-    end_idx = text.rfind("}")
-    if start_idx >= 0 and end_idx > start_idx:
-        candidate = text[start_idx : end_idx + 1]
-        try:
-            loaded = json.loads(candidate)
-            if isinstance(loaded, dict):
-                return loaded
-        except json.JSONDecodeError:
-            pass
-
-    return {}
+def _warn_parse_fallback(content: str) -> None:
+    snippet = _truncate_string((content or "").replace("\n", " "), max_len=240)
+    print(f"[warn] Unable to parse LLM action. Falling back to noop. content_snippet={snippet}")
 
 
-def _parse_action(content: str) -> dict[str, Any]:
-    data = _extract_json_block(content)
+def _coerce_action_type(raw_value: Any) -> str:
+    normalized = str(raw_value or "").strip().lower()
+    aliases = {
+        "query": "run_query",
+        "runquery": "run_query",
+        "fix_sql": "fix_query",
+        "fixsql": "fix_query",
+        "fix": "fix_query",
+        "query_fix": "fix_query",
+        "run_sql": "run_query",
+        "execute_query": "run_query",
+        "execute": "run_query",
+        "finalize": "submit",
+        "submit_answer": "submit",
+        "answer": "submit",
+        "no_action": "noop",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in ALLOWED_ACTIONS:
+        return "noop"
+    return normalized
 
+
+def _extract_markdown_json_blocks(text: str) -> list[str]:
+    matches = re.findall(r"```(?:json|JSON)?\s*(.*?)```", text, flags=re.DOTALL)
+    return [match.strip() for match in matches if match.strip()]
+
+
+def _extract_tag_blocks(text: str, tag_name: str) -> list[str]:
+    pattern = rf"<{tag_name}[^>]*>(.*?)</{tag_name}>"
+    matches = re.findall(pattern, text, flags=re.DOTALL | re.IGNORECASE)
+    return [match.strip() for match in matches if match.strip()]
+
+
+def _extract_balanced_json_objects(text: str, max_blocks: int = 12) -> list[str]:
+    blocks: list[str] = []
+    depth = 0
+    start_idx = -1
+    in_string = False
+    escaped = False
+
+    for idx, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+            continue
+
+        if char == "{":
+            if depth == 0:
+                start_idx = idx
+            depth += 1
+            continue
+
+        if char == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start_idx >= 0:
+                blocks.append(text[start_idx : idx + 1].strip())
+                start_idx = -1
+                if len(blocks) >= max_blocks:
+                    break
+
+    return [block for block in blocks if block]
+
+
+def _repair_json(candidate: str) -> str:
+    fixed = (candidate or "").strip()
+    if not fixed:
+        return fixed
+
+    fixed = re.sub(r"^```(?:json|JSON)?", "", fixed).replace("```", "").strip()
+    fixed = re.sub(r",\s*([}\]])", r"\1", fixed)
+    fixed = re.sub(r"([{,]\s*)([A-Za-z_][A-Za-z0-9_\-]*)(\s*:)", r'\1"\2"\3', fixed)
+    fixed = re.sub(r'("action_type"\s*:\s*)([A-Za-z_][A-Za-z0-9_]*)', r'\1"\2"', fixed)
+
+    fixed = re.sub(
+        r"'([^'\\]*(?:\\.[^'\\]*)*)'",
+        lambda m: '"' + m.group(1).replace('"', '\\"') + '"',
+        fixed,
+    )
+
+    fixed = re.sub(r"\bNone\b", "null", fixed)
+    fixed = re.sub(r"\bTrue\b", "true", fixed)
+    fixed = re.sub(r"\bFalse\b", "false", fixed)
+    return fixed
+
+
+def _build_parsed_action(data: dict[str, Any]) -> ParsedAction:
     action_obj = data.get("action", data)
     if not isinstance(action_obj, dict):
-        action_obj = {}
+        return ParsedAction(action_type="noop", parameters={})
 
-    action_type = str(action_obj.get("action_type", "submit")).strip().lower()
-    if action_type not in ALLOWED_ACTIONS:
-        action_type = "submit"
-
-    parameters = action_obj.get("parameters", {})
+    action_type = _coerce_action_type(action_obj.get("action_type", action_obj.get("type", "noop")))
+    parameters = action_obj.get("parameters", action_obj.get("payload", {}))
     if not isinstance(parameters, dict):
         parameters = {}
 
-    return {
-        "action_type": action_type,
-        "parameters": parameters,
-    }
+    return ParsedAction(action_type=action_type, parameters=parameters)
+
+
+def _try_parse_json_candidate(candidate: str) -> ParsedAction | None:
+    for payload in (candidate, _repair_json(candidate)):
+        payload = payload.strip()
+        if not payload:
+            continue
+        try:
+            loaded = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(loaded, dict):
+            return _build_parsed_action(loaded)
+    return None
+
+
+def _parse_key_value_action(text: str) -> ParsedAction | None:
+    action_match = re.search(r"action_type\s*[:=]\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)", text, flags=re.IGNORECASE)
+    if action_match is None:
+        return None
+
+    action_type = _coerce_action_type(action_match.group(1))
+    parameters: dict[str, Any] = {}
+
+    params_match = re.search(r"parameters\s*[:=]\s*(\{.*\})", text, flags=re.DOTALL | re.IGNORECASE)
+    if params_match is not None:
+        params_text = params_match.group(1)
+        for payload in (params_text, _repair_json(params_text)):
+            try:
+                loaded = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(loaded, dict):
+                parameters = loaded
+                break
+
+    query_match = re.search(r"query\s*[:=]\s*([\"'])(.*?)\1", text, flags=re.DOTALL | re.IGNORECASE)
+    if query_match is not None and "query" not in parameters:
+        parameters["query"] = query_match.group(2).strip()
+
+    return ParsedAction(action_type=action_type, parameters=parameters)
+
+
+def _parse_action(content: str) -> ParsedAction:
+    text = (content or "").strip()
+    if not text:
+        _warn_parse_fallback(content)
+        return ParsedAction(action_type="noop", parameters={})
+
+    candidates: list[str] = []
+
+    # Strategy 1: full response as-is.
+    candidates.append(text)
+
+    # Strategy 2: JSON fenced in markdown blocks.
+    candidates.extend(_extract_markdown_json_blocks(text))
+
+    # Strategy 3: explicit action tags.
+    candidates.extend(_extract_tag_blocks(text, "action"))
+
+    # Strategy 4: JSON mixed with reasoning text (balanced block extraction).
+    candidates.extend(_extract_balanced_json_objects(text))
+
+    # Strategy 5: reasoning + action on separate lines after think tags.
+    post_think = re.split(r"</think>", text, flags=re.IGNORECASE)
+    if len(post_think) > 1:
+        candidates.append(post_think[-1].strip())
+
+    deduped_candidates: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        candidate_stripped = candidate.strip()
+        if not candidate_stripped or candidate_stripped in seen:
+            continue
+        seen.add(candidate_stripped)
+        deduped_candidates.append(candidate_stripped)
+
+    for candidate in deduped_candidates:
+        parsed = _try_parse_json_candidate(candidate)
+        if parsed is not None:
+            return parsed
+
+    key_value_parsed = _parse_key_value_action(text)
+    if key_value_parsed is not None:
+        return key_value_parsed
+
+    _warn_parse_fallback(content)
+    return ParsedAction(action_type="noop", parameters={})
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -271,7 +509,11 @@ class EnvBridge:
         candidates: list[Any] = []
 
         # Modern OpenEnv-style dict payload.
-        candidates.append({"action_type": action_type, "parameters": parameters})
+        if action_type == "noop":
+            # Some env implementations do not support noop in OpenEnv enums.
+            candidates.append({"action_type": "submit", "parameters": {}})
+        else:
+            candidates.append({"action_type": action_type, "parameters": parameters})
 
         # Legacy dict payload for AgentAction.
         candidates.append({"action_type": LEGACY_ACTION_MAP.get(action_type, "noop"), "payload": parameters})
@@ -405,18 +647,129 @@ def _call_llm_with_retry(
     raise RuntimeError(f"OpenAI call failed after {MAX_API_RETRIES} attempts: {last_error}")
 
 
-def _build_user_message(task_id: str, step_number: int, observation: dict[str, Any], steps_remaining: int) -> str:
-    trimmed_observation = {
-        "task_id": task_id,
-        "step_number": step_number,
-        "steps_remaining": steps_remaining,
-        "task_description": observation.get("task_description", ""),
-        "current_sql_query": observation.get("current_sql_query", ""),
-        "error_messages": observation.get("error_messages", []),
-        "dataset_preview_count": observation.get("dataset_preview_count", 0),
-        "dataset_preview": observation.get("dataset_preview", []),
-    }
-    return json.dumps(trimmed_observation, ensure_ascii=True)
+def _enforce_message_budget(message: str, max_chars: int = ACTION_MESSAGE_CHAR_BUDGET) -> str:
+    if len(message) <= max_chars:
+        return message
+    return message[: max_chars - 3] + "..."
+
+
+def format_observation_user_message(
+    *,
+    task_id: str,
+    step_number: int,
+    steps_remaining: int,
+    observation: dict[str, Any],
+    last_action_result: dict[str, Any] | None,
+    max_tokens: int = ACTION_TOKEN_BUDGET,
+) -> str:
+    char_budget = max(800, int(max_tokens * APPROX_CHARS_PER_TOKEN))
+
+    task_description = _truncate_string(observation.get("task_description", ""), max_len=900)
+    current_sql_query = _truncate_string(observation.get("current_sql_query", ""), max_len=1400)
+    error_messages = observation.get("error_messages", [])
+    if not isinstance(error_messages, list):
+        error_messages = [str(error_messages)]
+
+    summary = observation.get("dataset_summary", {})
+    if not isinstance(summary, dict):
+        summary = {}
+
+    row_count = _safe_int(summary.get("row_count", observation.get("dataset_preview_count", 0)), 0)
+
+    column_names = summary.get("column_names", [])
+    if not isinstance(column_names, list):
+        column_names = []
+    column_names = [str(c) for c in column_names[:40]]
+
+    null_count = summary.get("null_count_per_column", {})
+    if not isinstance(null_count, dict):
+        null_count = {}
+    null_count_compact = {str(k): _safe_int(v, 0) for k, v in list(null_count.items())[:40]}
+
+    sample_rows = summary.get("sample_rows", observation.get("dataset_preview", []))
+    if not isinstance(sample_rows, list):
+        sample_rows = []
+    sample_rows_compact = [_compact_json_like(row, max_items=20, max_str_len=160) for row in sample_rows[:3]]
+
+    compact_last_action = _compact_json_like(last_action_result or {"status": "no_previous_action"}, max_items=12, max_str_len=180)
+    compact_errors = [_truncate_string(msg, max_len=280) for msg in error_messages[:8]]
+
+    sections = [
+        f"Task ID: {task_id}",
+        f"Step: {step_number}",
+        f"Remaining Steps: {steps_remaining}",
+        "",
+        "Task Description:",
+        task_description or "(empty)",
+        "",
+        "Dataset Summary:",
+        f"- row_count: {row_count}",
+        f"- column_names: {json.dumps(column_names, ensure_ascii=True)}",
+        f"- null_count_per_column: {json.dumps(null_count_compact, ensure_ascii=True)}",
+        f"- sample_rows: {json.dumps(sample_rows_compact, ensure_ascii=True)}",
+        "",
+        "Current SQL Query:",
+        current_sql_query or "(empty)",
+        "",
+        "Last Action Result:",
+        json.dumps(compact_last_action, ensure_ascii=True),
+        "",
+        "Error Messages:",
+        json.dumps(compact_errors, ensure_ascii=True),
+    ]
+    message = "\n".join(sections)
+
+    if len(message) > char_budget:
+        # First shrink samples/null counts, then shrink query/description.
+        sample_rows_compact = [_compact_json_like(row, max_items=8, max_str_len=100) for row in sample_rows[:1]]
+        null_count_compact = {str(k): _safe_int(v, 0) for k, v in list(null_count.items())[:20]}
+        compact_errors = [_truncate_string(msg, max_len=160) for msg in error_messages[:5]]
+        current_sql_query = _truncate_string(current_sql_query, max_len=700)
+        task_description = _truncate_string(task_description, max_len=500)
+
+        sections = [
+            f"Task ID: {task_id}",
+            f"Step: {step_number}",
+            f"Remaining Steps: {steps_remaining}",
+            "",
+            "Task Description:",
+            task_description or "(empty)",
+            "",
+            "Dataset Summary:",
+            f"- row_count: {row_count}",
+            f"- column_names: {json.dumps(column_names[:20], ensure_ascii=True)}",
+            f"- null_count_per_column: {json.dumps(null_count_compact, ensure_ascii=True)}",
+            f"- sample_rows: {json.dumps(sample_rows_compact, ensure_ascii=True)}",
+            "",
+            "Current SQL Query:",
+            current_sql_query or "(empty)",
+            "",
+            "Last Action Result:",
+            json.dumps(_compact_json_like(compact_last_action, max_items=8, max_str_len=120), ensure_ascii=True),
+            "",
+            "Error Messages:",
+            json.dumps(compact_errors, ensure_ascii=True),
+        ]
+        message = "\n".join(sections)
+
+    return _enforce_message_budget(message, max_chars=char_budget)
+
+
+def _build_user_message(
+    task_id: str,
+    step_number: int,
+    observation: dict[str, Any],
+    steps_remaining: int,
+    last_action_result: dict[str, Any] | None,
+) -> str:
+    return format_observation_user_message(
+        task_id=task_id,
+        step_number=step_number,
+        steps_remaining=steps_remaining,
+        observation=observation,
+        last_action_result=last_action_result,
+        max_tokens=ACTION_TOKEN_BUDGET,
+    )
 
 
 def _extract_final_score(observation: dict[str, Any], last_reward: float, info: dict[str, Any]) -> float:
@@ -528,6 +881,7 @@ def main() -> None:
         done = False
         last_reward = 0.0
         last_info: dict[str, Any] = {}
+        last_action_result: dict[str, Any] = {"status": "no_previous_action"}
         status = "ok"
         steps_taken = 0
 
@@ -542,6 +896,7 @@ def main() -> None:
                 step_number=step_idx,
                 observation=observation,
                 steps_remaining=steps_remaining,
+                last_action_result=last_action_result,
             )
 
             messages = [
@@ -566,7 +921,7 @@ def main() -> None:
             try:
                 observation, last_reward, done, last_info = env.step(
                     task_id=resolved_task_id,
-                    action=action,
+                    action=action.model_dump(),
                     step_index=step_idx,
                 )
             except Exception as exc:
@@ -574,9 +929,17 @@ def main() -> None:
                 status = "step_failed"
                 break
 
+            last_action_result = {
+                "action_type": action.action_type,
+                "parameters": _compact_json_like(action.parameters, max_items=12, max_str_len=180),
+                "reward": round(last_reward, 6),
+                "done": bool(done),
+                "info": _compact_json_like(last_info, max_items=12, max_str_len=180),
+            }
+
             steps_taken = step_idx
             print(
-                f"[{resolved_task_id}] step={step_idx:02d} action={action['action_type']} "
+                f"[{resolved_task_id}] step={step_idx:02d} action={action.action_type} "
                 f"reward={last_reward:.4f} done={done}"
             )
 
