@@ -1,0 +1,32 @@
+api_version: openenv/v1
+environment:
+  id: meddataops
+  name: MedDataOps
+  version: 0.1.0
+  description: Clinical data engineering RL environment for cleaning noisy hospital data and fixing SQL.
+  entrypoint: meddataops.env:MedDataOpsEnv
+
+interfaces:
+  reset:
+    request_model: meddataops.models.ResetRequest
+    response_model: meddataops.models.EnvironmentState
+  step:
+    request_model: meddataops.models.AgentAction
+    response_model: meddataops.models.StepResult
+  state:
+    response_model: meddataops.models.EnvironmentState
+
+tasks:
+  - id: easy
+    difficulty: easy
+    description: Trim and normalize vitals dataset, then fix a bad GROUP BY query.
+  - id: medium
+    difficulty: medium
+    description: Normalize lab units and dates, then fix a broken join query.
+  - id: hard
+    difficulty: hard
+    description: Standardize ICU telemetry rows and repair a window function query.
+
+backend:
+  type: postgresql
+  dsn_env: MEDDATAOPS_POSTGRES_DSN
