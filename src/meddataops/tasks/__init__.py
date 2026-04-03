@@ -12,12 +12,19 @@ TASK_REGISTRY: dict[str, TaskSpec] = {
     HARD_TASK.id: HARD_TASK,
 }
 
+TASK_ALIASES: dict[str, str] = {
+    "easy": EASY_TASK.id,
+    "medium": MEDIUM_TASK.id,
+    "hard": HARD_TASK.id,
+}
+
 
 def list_tasks() -> list[str]:
     return list(TASK_REGISTRY.keys())
 
 
 def get_task(task_id: str) -> TaskSpec:
-    if task_id not in TASK_REGISTRY:
+    resolved_task_id = TASK_ALIASES.get(task_id, task_id)
+    if resolved_task_id not in TASK_REGISTRY:
         raise KeyError(f"Unknown task_id: {task_id}")
-    return TASK_REGISTRY[task_id].model_copy(deep=True)
+    return TASK_REGISTRY[resolved_task_id].model_copy(deep=True)
