@@ -1,0 +1,99 @@
+name: Quality and Deploy Gates
+
+on:
+  pull_request:
+    branches: ["main"]
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality_checks:
+    name: Quality Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compile source files
+        run: |
+          python -m compileall src server.py inference.py
+
+      - name: Run deterministic task checks
+        run: |
+          python test_tasks.py
+
+  staging_validation:
+    name: Staging Validation Gate
+    needs: quality_checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate release bookkeeping
+        run: |
+          test -f CHANGELOG.md
+          grep -q "## \[Unreleased\]" CHANGELOG.md
+
+      - name: Validate required docs sections
+        run: |
+          python - <<'PY'
+          import pathlib
+
+          readme = pathlib.Path("README.md").read_text(encoding="utf-8")
+          required = [
+              "## Quick Navigation",
+              "## 1. Objective and Scope",
+              "## 2. OpenEnv API Contract",
+              "## 3. Technical Architecture",
+              "## 4. RL Benchmark Tasks",
+              "## 5. Evaluation Methodology",
+              "## 6. OpenEnv Compliance Checklist",
+              "## 7. Setup and Run Instructions",
+              "## 8. API Usage Examples",
+              "## 9. Design Decisions and Trade-offs",
+              "## 10. Project Structure",
+          ]
+
+          missing = [section for section in required if section not in readme]
+          if missing:
+              raise SystemExit(f"Missing README sections: {missing}")
+
+          print("README structure check passed")
+          PY
+
+  production_approval:
+    name: Production Approval
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: staging_validation
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - name: Await environment approval
+        run: echo "Production approval granted."
+
+  production_deploy:
+    name: Production Deploy Placeholder
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: production_approval
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deployment handoff
+        run: |
+          echo "Main branch passed all gates."
+          echo "Connect this job to your release script or HF sync action."

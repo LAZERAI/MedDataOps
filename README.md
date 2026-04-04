@@ -17,6 +17,21 @@ tags:
 # MedDataOps
 Clinical data engineering RL environment for training agents to clean hospital data and repair production SQL under realistic constraints.
 
+Quick navigation:
+
+- [1. Motivation](#1-motivation)
+- [2. Environment Overview](#2-environment-overview)
+- [3. Action Space](#3-action-space)
+- [4. Observation Space](#4-observation-space)
+- [5. Tasks](#5-tasks)
+- [6. Reward Function](#6-reward-function)
+- [7. Quick Start](#7-quick-start)
+- [8. API Reference](#8-api-reference)
+- [9. Baseline Scores](#9-baseline-scores)
+- [10. Project Structure](#10-project-structure)
+- [11. Contributing](#11-contributing)
+- [12. License](#12-license)
+
 ## 1. Motivation
 Clinical data pipelines are not abstract spreadsheet problems. They drive triage views, medication safety dashboards, and ICU capacity planning. When these pipelines fail, clinicians make decisions on bad information.
 
@@ -44,6 +59,13 @@ Core characteristics:
 - explicit action space (clean_data / run_query / fix_query / submit)
 - structured observation payloads for agent planning
 - reward decomposition for cleaning quality, query quality, efficiency, and step discipline
+
+Local web UI defaults:
+
+- keyboard-first navigation with a skip link and visible focus indicators
+- screen-reader status announcements for demo lifecycle states
+- sanitized client rendering path (no direct HTML interpolation of API payloads)
+- session identifier validation before local persistence
 
 ## 3. Action Space
 The API accepts action payloads via `POST /step`.
@@ -143,6 +165,13 @@ python inference.py
 curl -s http://localhost:7860/health
 curl -s http://localhost:7860/tasks
 ```
+
+### Open the local UI
+
+1. Start the service with Docker or Python.
+2. Open `http://localhost:7860/` in your browser.
+3. Use the "Run Demo Episode" control to execute reset -> clean_data -> fix_query -> submit.
+4. Inspect `/state` to confirm final step details.
 
 ## 8. API Reference
 

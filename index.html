@@ -3,446 +3,674 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>MedDataOps</title>
+  <meta name="description" content="MedDataOps mission console for OpenEnv clinical data engineering: task briefings, guided episode execution, and endpoint runbook." />
+  <title>MedDataOps Mission Console</title>
   <style>
+    @import url("https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap");
+
     :root {
-      --bg: #f4f7fb;
-      --card: #ffffff;
-      --ink: #10243f;
-      --muted: #4d617d;
-      --brand: #0f6dd9;
-      --brand-2: #1fa774;
-      --border: #dbe5f2;
-      --easy: #136f63;
-      --medium: #a06200;
-      --hard: #9f1239;
-      --shadow: 0 18px 50px rgba(16, 36, 63, 0.1);
+      --canvas: #f4efe3;
+      --canvas-alt: #efe7d7;
+      --paper: #fffaf1;
+      --ink: #1f2833;
+      --ink-soft: #4b5a6d;
+      --line: #d8ccb6;
+      --navy: #1d456b;
+      --teal: #1f6f78;
+      --rust: #b04a2f;
+      --gold: #8e6a15;
+      --easy: #21695c;
+      --medium: #9a5b00;
+      --hard: #9e2f47;
+      --lift: 0 20px 45px rgba(41, 53, 66, 0.12);
+      --radius: 18px;
+      --timing: 540ms;
     }
 
-    * { box-sizing: border-box; }
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      min-height: 100%;
+    }
+
     body {
       margin: 0;
-      font-family: "Segoe UI", "Avenir Next", "Trebuchet MS", sans-serif;
-      background: radial-gradient(circle at 15% 15%, #dff3ff 0%, transparent 45%),
-                  radial-gradient(circle at 85% 0%, #ddf8ea 0%, transparent 45%),
-                  var(--bg);
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      line-height: 1.55;
       color: var(--ink);
+      background:
+        linear-gradient(30deg, rgba(240, 230, 213, 0.72) 12%, transparent 12.5%, transparent 87%, rgba(240, 230, 213, 0.72) 87.5%, rgba(240, 230, 213, 0.72)),
+        linear-gradient(150deg, rgba(240, 230, 213, 0.72) 12%, transparent 12.5%, transparent 87%, rgba(240, 230, 213, 0.72) 87.5%, rgba(240, 230, 213, 0.72)),
+        linear-gradient(30deg, rgba(245, 239, 227, 0.9) 12%, transparent 12.5%, transparent 87%, rgba(245, 239, 227, 0.9) 87.5%, rgba(245, 239, 227, 0.9)),
+        linear-gradient(150deg, rgba(245, 239, 227, 0.9) 12%, transparent 12.5%, transparent 87%, rgba(245, 239, 227, 0.9) 87.5%, rgba(245, 239, 227, 0.9)),
+        linear-gradient(60deg, rgba(230, 219, 201, 0.5) 25%, transparent 25.5%, transparent 75%, rgba(230, 219, 201, 0.5) 75%, rgba(230, 219, 201, 0.5)),
+        var(--canvas);
+      background-size: 96px 168px;
+      background-position: 0 0, 0 0, 48px 84px, 48px 84px, 0 0;
     }
 
-    .wrap {
-      width: min(1120px, 92vw);
-      margin: 28px auto 44px;
+    .skip-link {
+      position: absolute;
+      top: -100px;
+      left: 10px;
+      z-index: 999;
+      background: #11273d;
+      color: #fff;
+      border-radius: 8px;
+      padding: 10px 12px;
+      text-decoration: none;
+      font-weight: 700;
+    }
+
+    .skip-link:focus {
+      top: 8px;
+    }
+
+    .screen-reader-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    .board {
+      width: min(1200px, 93vw);
+      margin: 32px auto 52px;
       display: grid;
       gap: 18px;
     }
 
+    .panel {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--lift);
+      padding: 18px;
+      opacity: 0;
+      transform: translateY(14px);
+      animation: rise var(--timing) cubic-bezier(0.22, 1, 0.36, 1) forwards;
+    }
+
+    .panel:nth-child(2) {
+      animation-delay: 70ms;
+    }
+
+    .panel:nth-child(3) {
+      animation-delay: 130ms;
+    }
+
+    @keyframes rise {
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
     .hero {
-      background: linear-gradient(125deg, #0f6dd9 0%, #1fa774 100%);
-      color: #f6fbff;
-      border-radius: 20px;
-      padding: 28px;
-      box-shadow: var(--shadow);
+      padding: 24px;
+      background:
+        radial-gradient(circle at 8% 20%, rgba(31, 111, 120, 0.13) 0%, transparent 45%),
+        radial-gradient(circle at 95% 0%, rgba(176, 74, 47, 0.14) 0%, transparent 40%),
+        linear-gradient(120deg, rgba(255, 255, 255, 0.65) 0%, rgba(251, 243, 230, 0.96) 100%);
     }
 
-    .hero h1 {
-      margin: 0 0 8px;
-      font-size: clamp(1.8rem, 3.2vw, 2.5rem);
-      line-height: 1.05;
-      letter-spacing: 0.2px;
+    .eyebrow {
+      margin: 0;
+      color: var(--teal);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-size: 0.73rem;
+      font-weight: 700;
     }
 
-    .hero p {
-      margin: 6px 0;
-      max-width: 900px;
-      color: rgba(246, 251, 255, 0.96);
-      line-height: 1.45;
+    h1 {
+      margin: 8px 0 10px;
+      font-family: "Fraunces", Georgia, serif;
+      font-weight: 700;
+      font-size: clamp(1.9rem, 3.8vw, 3rem);
+      line-height: 1.03;
+      letter-spacing: 0.01em;
+      color: #1f2c3a;
+      max-width: 13ch;
     }
 
-    .grid-2 {
+    .lede {
+      margin: 0;
+      color: #2b3c4f;
+      max-width: 72ch;
+    }
+
+    .hero-meta {
+      margin-top: 14px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: #f2e8d8;
+      color: #2b3f52;
+      border: 1px solid #d8c4a4;
+      border-radius: 999px;
+      padding: 6px 11px;
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+    }
+
+    .layout {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 18px;
     }
 
-    @media (max-width: 920px) {
-      .grid-2 { grid-template-columns: 1fr; }
+    h2 {
+      margin: 0;
+      font-family: "Fraunces", Georgia, serif;
+      font-size: 1.35rem;
+      color: #1f3245;
+      letter-spacing: 0.02em;
     }
 
-    .card {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 16px;
-      box-shadow: 0 6px 24px rgba(16, 36, 63, 0.06);
-      padding: 18px;
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
     }
 
-    .card h2 {
-      margin: 0 0 12px;
-      font-size: 1.1rem;
-      color: #15345f;
+    .muted {
+      margin: 0;
+      color: var(--ink-soft);
+      font-size: 0.95rem;
     }
 
     .task-list {
-      display: grid;
-      gap: 10px;
-      margin: 0;
-      padding: 0;
       list-style: none;
+      margin: 14px 0 0;
+      padding: 0;
+      display: grid;
+      gap: 11px;
     }
 
     .task-item {
-      border: 1px solid #e6edf7;
+      background: #fffdf8;
+      border: 1px solid #dccdaf;
+      border-left-width: 6px;
       border-radius: 12px;
-      padding: 12px;
-      background: #fcfeff;
+      padding: 11px 12px;
+    }
+
+    .task-item[data-difficulty="easy"] {
+      border-left-color: var(--easy);
+    }
+
+    .task-item[data-difficulty="medium"] {
+      border-left-color: var(--medium);
+    }
+
+    .task-item[data-difficulty="hard"] {
+      border-left-color: var(--hard);
     }
 
     .task-top {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 8px;
-      margin-bottom: 7px;
+      gap: 10px;
+      margin-bottom: 6px;
     }
 
     .task-id {
+      font-family: "JetBrains Mono", Consolas, monospace;
+      font-size: 0.85rem;
       font-weight: 700;
-      color: #173761;
+      color: #183350;
+      letter-spacing: 0.01em;
     }
 
     .badge {
-      font-size: 0.76rem;
       text-transform: uppercase;
-      letter-spacing: 0.3px;
-      color: #fff;
       border-radius: 999px;
       padding: 4px 9px;
+      color: #fff;
+      font-size: 0.72rem;
+      letter-spacing: 0.08em;
       font-weight: 700;
     }
 
-    .badge.easy { background: var(--easy); }
-    .badge.medium { background: var(--medium); }
-    .badge.hard { background: var(--hard); }
+    .badge.easy {
+      background: var(--easy);
+    }
 
-    .muted {
-      color: var(--muted);
-      line-height: 1.4;
-      margin: 0;
-      font-size: 0.95rem;
+    .badge.medium {
+      background: var(--medium);
+    }
+
+    .badge.hard {
+      background: var(--hard);
+    }
+
+    .hint {
+      margin-top: 6px;
+      font-size: 0.85rem;
+      color: #3f5268;
+      border-top: 1px dashed #d4c3a4;
+      padding-top: 6px;
     }
 
     .btn {
+      min-width: 44px;
+      min-height: 44px;
       border: 0;
-      border-radius: 10px;
+      border-radius: 12px;
       padding: 11px 14px;
-      background: linear-gradient(120deg, var(--brand) 0%, var(--brand-2) 100%);
-      color: #fff;
+      font-size: 0.9rem;
       font-weight: 700;
+      color: #fff;
+      background: linear-gradient(130deg, var(--navy) 0%, var(--teal) 70%, #2f7580 100%);
       cursor: pointer;
-      box-shadow: 0 8px 18px rgba(15, 109, 217, 0.22);
+      box-shadow: 0 10px 24px rgba(27, 55, 83, 0.2);
+      transition: transform 120ms ease, box-shadow 120ms ease;
+    }
+
+    .btn:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 16px 28px rgba(27, 55, 83, 0.26);
     }
 
     .btn:disabled {
+      opacity: 0.65;
       cursor: not-allowed;
-      opacity: 0.7;
-    }
-
-    .row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      margin-bottom: 10px;
-      flex-wrap: wrap;
+      transform: none;
+      box-shadow: 0 8px 18px rgba(27, 55, 83, 0.16);
     }
 
     pre {
-      margin: 0;
-      background: #0f1f33;
-      color: #d8e8ff;
+      margin: 10px 0 0;
+      background: #14283f;
+      color: #d7e7ff;
+      border: 1px solid #2f4f73;
       border-radius: 12px;
-      padding: 12px;
+      padding: 14px;
+      max-height: 380px;
       overflow: auto;
-      max-height: 360px;
-      font-size: 0.84rem;
-      line-height: 1.45;
-      border: 1px solid #223a58;
+      font-family: "JetBrains Mono", Consolas, monospace;
+      font-size: 0.83rem;
+      line-height: 1.5;
     }
 
     code {
-      font-family: "Cascadia Mono", "Fira Code", Consolas, monospace;
-      font-size: 0.86rem;
+      font-family: "JetBrains Mono", Consolas, monospace;
+      font-size: 0.84rem;
     }
 
-    .api-grid {
+    .endpoint-grid {
+      margin-top: 12px;
       display: grid;
       gap: 10px;
     }
 
-    .api-item {
-      border: 1px dashed #c7d8ee;
-      border-radius: 10px;
+    .endpoint-item {
+      border: 1px solid #d8cab0;
+      border-radius: 12px;
+      background: #fffdf9;
       padding: 10px;
-      background: #fbfdff;
     }
 
-    .endpoint {
-      font-weight: 800;
-      color: #194574;
-      margin-bottom: 6px;
-    }
-
-    .ok {
-      color: #136f63;
-      font-weight: 700;
-    }
-
-    .warn {
-      color: #a06200;
+    .endpoint-title {
+      margin: 0 0 4px;
+      color: #173552;
+      font-family: "JetBrains Mono", Consolas, monospace;
+      font-size: 0.86rem;
       font-weight: 700;
     }
 
     .footer-note {
-      color: #5b6f8f;
-      font-size: 0.9rem;
-      margin-top: 2px;
+      margin: 0;
+      color: #4f5e71;
+      font-size: 0.88rem;
+    }
+
+    :focus-visible {
+      outline: 3px solid #124f8f;
+      outline-offset: 2px;
+    }
+
+    @media (max-width: 980px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .board {
+        width: min(760px, 94vw);
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .panel,
+      .btn {
+        animation: none;
+        transition: none;
+      }
     }
   </style>
 </head>
 <body>
-  <main class="wrap">
-    <section class="hero">
-      <h1>MedDataOps</h1>
-      <p>
-        OpenEnv-compatible RL environment for clinical data engineering.
-        Agents clean noisy hospital data and repair SQL across progressive task difficulty.
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <main id="main-content" class="board" tabindex="-1">
+    <header class="panel hero">
+      <p class="eyebrow">OpenEnv Clinical Data Engineering Lab</p>
+      <h1>MedDataOps Mission Console</h1>
+      <p class="lede">
+        A high-precision sandbox for hospital analytics incidents. Clean messy clinical records,
+        repair broken SQL, and verify final state quality under constrained episodic steps.
       </p>
-      <p class="footer-note">Docker-based HuggingFace Space • API port 7860 • Session-aware HTTP runtime</p>
+      <div class="hero-meta" aria-label="Platform highlights">
+        <span class="pill">Docker-first runtime</span>
+        <span class="pill">OpenEnv HTTP contract</span>
+        <span class="pill">Deterministic task seeds</span>
+        <span class="pill">Port 7860</span>
+      </div>
+    </header>
+
+    <section class="layout">
+      <article class="panel" aria-labelledby="task-briefing-title">
+        <div class="panel-head">
+          <h2 id="task-briefing-title">Task Briefings</h2>
+        </div>
+        <p class="muted">Each task contains intentionally corrupted data and query defects. Start with triage, then move to medium and hard scenarios.</p>
+        <ul id="task-list" class="task-list" aria-live="polite"></ul>
+      </article>
+
+      <article class="panel" aria-labelledby="runner-title">
+        <div class="panel-head">
+          <h2 id="runner-title">Guided Episode Runner</h2>
+          <button id="demo-btn" type="button" class="btn" aria-describedby="demo-help">Run Guided Episode</button>
+        </div>
+        <p id="demo-help" class="muted">Executes <code>clean_data</code> -> <code>fix_query</code> -> <code>submit</code> using the active API session.</p>
+        <p id="demo-status" class="screen-reader-only" aria-live="polite"></p>
+        <pre id="demo-output" role="status" aria-live="polite" aria-atomic="false">Press "Run Guided Episode" to execute a complete sample flow against /reset and /step.</pre>
+      </article>
     </section>
 
-    <section class="grid-2">
-      <article class="card">
-        <h2>Tasks</h2>
-        <ul id="task-list" class="task-list"></ul>
-      </article>
-
-      <article class="card">
-        <div class="row">
-          <h2 style="margin:0;">Live Demo Episode</h2>
-          <button id="demo-btn" class="btn">Run Demo Episode</button>
-        </div>
-        <p class="muted" style="margin-bottom:10px;">
-          This runs a hardcoded 3-step demo agent: <code>clean_data</code> → <code>fix_query</code> → <code>submit</code>.
-        </p>
-        <pre id="demo-output">Click "Run Demo Episode" to execute a sample interaction against /reset and /step.</pre>
-      </article>
-    </section>
-
-    <section class="grid-2">
-      <article class="card">
-        <h2>API Endpoints</h2>
-        <div class="api-grid">
-          <div class="api-item">
-            <div class="endpoint">POST /reset</div>
-            <p class="muted">Start or restart an episode. Optional body: <code>{"task_id":"triage_report"}</code>.</p>
+    <section class="layout">
+      <article class="panel" aria-labelledby="endpoint-title">
+        <h2 id="endpoint-title">Endpoint Matrix</h2>
+        <div class="endpoint-grid">
+          <div class="endpoint-item">
+            <p class="endpoint-title">POST /reset</p>
+            <p class="muted">Start a new episode and receive the first observation state.</p>
           </div>
-          <div class="api-item">
-            <div class="endpoint">POST /step</div>
-            <p class="muted">Send an action: <code>{"action_type":"run_query","parameters":{"query":"SELECT 1"}}</code>.</p>
+          <div class="endpoint-item">
+            <p class="endpoint-title">POST /step</p>
+            <p class="muted">Submit a single agent action payload and receive reward + next observation.</p>
           </div>
-          <div class="api-item">
-            <div class="endpoint">GET /state</div>
-            <p class="muted">Get full current session state for the active episode.</p>
+          <div class="endpoint-item">
+            <p class="endpoint-title">GET /state</p>
+            <p class="muted">Read the complete current session snapshot, including latest reward metadata.</p>
           </div>
-          <div class="api-item">
-            <div class="endpoint">GET /health</div>
-            <p class="muted">Returns platform health payload with API version.</p>
+          <div class="endpoint-item">
+            <p class="endpoint-title">GET /tasks</p>
+            <p class="muted">List available tasks with hints and difficulty metadata.</p>
           </div>
-          <div class="api-item">
-            <div class="endpoint">GET /tasks</div>
-            <p class="muted">List all available tasks with metadata and hints.</p>
+          <div class="endpoint-item">
+            <p class="endpoint-title">GET /health</p>
+            <p class="muted">Probe API readiness and version response payload.</p>
           </div>
         </div>
       </article>
 
-      <article class="card">
-        <h2>Try It with curl</h2>
-        <pre><code># Set your Space URL first
+      <article class="panel" aria-labelledby="runbook-title">
+        <h2 id="runbook-title">cURL Runbook</h2>
+        <pre><code># Set your Space URL
 export SPACE_URL="https://&lt;your-space-name&gt;.hf.space"
 
-# 1) health
+# Health + task list
 curl -s "$SPACE_URL/health"
-
-# 2) tasks
 curl -s "$SPACE_URL/tasks"
 
-# 3) reset (save session id)
+# Reset and capture session
 SESSION_ID=$(curl -si -X POST "$SPACE_URL/reset" \
   -H "Content-Type: application/json" \
   -d '{"task_id":"triage_report"}' | sed -n 's/^X-Session-Id: //p' | tr -d '\r')
 
-# 4) step
+# Submit one action
 curl -s -X POST "$SPACE_URL/step" \
   -H "Content-Type: application/json" \
   -H "X-Session-Id: $SESSION_ID" \
   -d '{"action_type":"submit","parameters":{}}'
 
-# 5) state
+# Read final state
 curl -s "$SPACE_URL/state" -H "X-Session-Id: $SESSION_ID"</code></pre>
       </article>
     </section>
+
+    <p class="footer-note">Mission Console UI emphasizes keyboard accessibility, safer rendering paths, and deterministic demo execution for reproducible evaluations.</p>
   </main>
 
   <script>
-    const demoOutput = document.getElementById('demo-output');
-    const demoBtn = document.getElementById('demo-btn');
-    const taskList = document.getElementById('task-list');
+    const taskList = document.getElementById("task-list");
+    const demoButton = document.getElementById("demo-btn");
+    const demoOutput = document.getElementById("demo-output");
+    const demoStatus = document.getElementById("demo-status");
 
-    let sessionId = localStorage.getItem('meddataops_session_id') || '';
+    const API_TIMEOUT_MS = 15000;
+    const SESSION_STORAGE_KEY = "meddataops_session_id";
+
+    let sessionId = localStorage.getItem(SESSION_STORAGE_KEY) || "";
+
+    function isValidSessionId(value) {
+      return typeof value === "string" && /^[A-Za-z0-9_-]{12,128}$/.test(value);
+    }
+
+    if (!isValidSessionId(sessionId)) {
+      sessionId = "";
+      localStorage.removeItem(SESSION_STORAGE_KEY);
+    }
+
+    function setDemoStatus(message) {
+      demoStatus.textContent = message;
+    }
+
+    function el(tag, className, text) {
+      const node = document.createElement(tag);
+      if (className) {
+        node.className = className;
+      }
+      if (typeof text === "string") {
+        node.textContent = text;
+      }
+      return node;
+    }
 
     const fallbackTasks = [
       {
-        id: 'triage_report',
-        difficulty: 'easy',
-        description: 'Clean patient admissions data and repair a ward aggregation query.'
+        id: "triage_report",
+        difficulty: "easy",
+        description: "Clean patient admissions data and repair a ward aggregation query.",
       },
       {
-        id: 'medication_summary',
-        difficulty: 'medium',
-        description: 'Normalize medications data and fix a broken patient-medication join.'
+        id: "medication_summary",
+        difficulty: "medium",
+        description: "Normalize medication records and repair broken joins.",
       },
       {
-        id: 'icu_capacity',
-        difficulty: 'hard',
-        description: 'Standardize merged ICU feeds and optimize a complex capacity query.'
-      }
+        id: "icu_capacity",
+        difficulty: "hard",
+        description: "Resolve merged ICU feed drift and optimize capacity analytics query.",
+      },
     ];
 
     function renderTasks(tasks) {
-      const rows = tasks.length ? tasks : fallbackTasks;
-      taskList.innerHTML = rows.map(task => {
-        const difficulty = (task.difficulty || 'unknown').toLowerCase();
-        const badgeClass = ['easy', 'medium', 'hard'].includes(difficulty) ? difficulty : 'medium';
-        const hintText = Array.isArray(task.hints) && task.hints.length
-          ? `<p class="muted" style="margin-top:6px;">Hint: ${task.hints[0]}</p>`
-          : '';
+      const rows = Array.isArray(tasks) && tasks.length ? tasks : fallbackTasks;
+      taskList.innerHTML = "";
 
-        return `
-          <li class="task-item">
-            <div class="task-top">
-              <span class="task-id">${task.id}</span>
-              <span class="badge ${badgeClass}">${difficulty}</span>
-            </div>
-            <p class="muted">${task.description || ''}</p>
-            ${hintText}
-          </li>
-        `;
-      }).join('');
+      const fragment = document.createDocumentFragment();
+
+      rows.forEach((task) => {
+        const difficulty = String(task.difficulty || "unknown").toLowerCase();
+        const normalizedDifficulty = ["easy", "medium", "hard"].includes(difficulty)
+          ? difficulty
+          : "medium";
+
+        const item = el("li", "task-item");
+        item.dataset.difficulty = normalizedDifficulty;
+
+        const top = el("div", "task-top");
+        const id = el("span", "task-id", String(task.id || "unknown_task"));
+        const badge = el("span", `badge ${normalizedDifficulty}`, normalizedDifficulty);
+        top.append(id, badge);
+
+        const description = el("p", "muted", String(task.description || ""));
+
+        item.append(top, description);
+
+        if (Array.isArray(task.hints) && task.hints.length) {
+          const hint = el("p", "hint", `Hint: ${String(task.hints[0])}`);
+          item.appendChild(hint);
+        }
+
+        fragment.appendChild(item);
+      });
+
+      taskList.appendChild(fragment);
     }
 
     async function apiFetch(path, options = {}) {
       const headers = Object.assign({}, options.headers || {});
-      if (!headers['Content-Type'] && options.method && options.method !== 'GET') {
-        headers['Content-Type'] = 'application/json';
+      if (!headers["Content-Type"] && options.method && options.method !== "GET") {
+        headers["Content-Type"] = "application/json";
       }
+
       if (sessionId) {
-        headers['X-Session-Id'] = sessionId;
+        headers["X-Session-Id"] = sessionId;
       }
 
-      const res = await fetch(path, {
-        method: options.method || 'GET',
-        headers,
-        body: options.body,
-        credentials: 'include',
-      });
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
 
-      const returnedSession = res.headers.get('x-session-id');
-      if (returnedSession) {
-        sessionId = returnedSession;
-        localStorage.setItem('meddataops_session_id', sessionId);
-      }
-
-      const text = await res.text();
-      let data;
+      let response;
       try {
-        data = text ? JSON.parse(text) : {};
-      } catch (_) {
-        data = { raw: text };
+        response = await fetch(path, {
+          method: options.method || "GET",
+          headers,
+          body: options.body,
+          credentials: "include",
+          signal: controller.signal,
+        });
+      } catch (error) {
+        if (error && error.name === "AbortError") {
+          throw new Error(`Request timeout after ${API_TIMEOUT_MS}ms`);
+        }
+        throw error;
+      } finally {
+        clearTimeout(timeout);
       }
 
-      if (!res.ok) {
-        const detail = data && data.detail ? JSON.stringify(data.detail) : text || `HTTP ${res.status}`;
-        throw new Error(detail);
+      const returnedSession = response.headers.get("x-session-id");
+      if (returnedSession && isValidSessionId(returnedSession)) {
+        sessionId = returnedSession;
+        localStorage.setItem(SESSION_STORAGE_KEY, sessionId);
       }
-      return data;
+
+      const raw = await response.text();
+      let payload;
+      try {
+        payload = raw ? JSON.parse(raw) : {};
+      } catch {
+        payload = { raw };
+      }
+
+      if (!response.ok) {
+        const details = payload && payload.detail ? JSON.stringify(payload.detail) : raw || `HTTP ${response.status}`;
+        throw new Error(details);
+      }
+
+      return payload;
     }
 
     async function loadTasks() {
       try {
-        const data = await apiFetch('/tasks');
-        renderTasks((data && data.tasks) || []);
-      } catch (err) {
+        const data = await apiFetch("/tasks");
+        renderTasks(data && data.tasks ? data.tasks : []);
+      } catch {
         renderTasks(fallbackTasks);
       }
     }
 
-    async function runDemoEpisode() {
-      demoBtn.disabled = true;
-      demoOutput.textContent = 'Running demo...';
+    async function runGuidedEpisode() {
+      demoButton.disabled = true;
+      setDemoStatus("Guided episode started.");
+      demoOutput.textContent = "Running guided episode...";
 
       try {
         const transcript = [];
-        const reset = await apiFetch('/reset', {
-          method: 'POST',
-          body: JSON.stringify({ task_id: 'triage_report' }),
-        });
 
-        transcript.push({ step: 'reset', observation: reset, session_id: sessionId || null });
+        const reset = await apiFetch("/reset", {
+          method: "POST",
+          body: JSON.stringify({ task_id: "triage_report" }),
+        });
+        transcript.push({ step: "reset", session_id: sessionId || null, observation: reset });
 
         const actions = [
           {
-            action_type: 'clean_data',
+            action_type: "clean_data",
             parameters: {
-              operations: [
-                { operation: 'normalize_strings', columns: ['ward'], case: 'upper' }
-              ]
-            }
+              operations: [{ operation: "normalize_strings", columns: ["ward"], case: "upper" }],
+            },
           },
           {
-            action_type: 'fix_query',
+            action_type: "fix_query",
             parameters: {
-              query: "SELECT ward, COUNT(*) AS patient_count FROM patients WHERE admission_date >= DATE '2024-01-01' GROUP BY ward ORDER BY patient_count DESC, ward ASC"
-            }
+              query: "SELECT ward, COUNT(*) AS patient_count FROM patients WHERE admission_date >= DATE '2024-01-01' GROUP BY ward ORDER BY patient_count DESC, ward ASC",
+            },
           },
           {
-            action_type: 'submit',
-            parameters: {}
-          }
+            action_type: "submit",
+            parameters: {},
+          },
         ];
 
-        for (let i = 0; i < actions.length; i += 1) {
-          const result = await apiFetch('/step', {
-            method: 'POST',
-            body: JSON.stringify(actions[i]),
+        for (let index = 0; index < actions.length; index += 1) {
+          const action = actions[index];
+          const result = await apiFetch("/step", {
+            method: "POST",
+            body: JSON.stringify(action),
           });
-          transcript.push({ step: `step_${i + 1}`, action: actions[i], result });
+
+          transcript.push({ step: `step_${index + 1}`, action, result });
           if (result.done) {
             break;
           }
         }
 
-        const state = await apiFetch('/state');
-        transcript.push({ step: 'state', state });
+        const state = await apiFetch("/state");
+        transcript.push({ step: "state", state });
 
         demoOutput.textContent = JSON.stringify(transcript, null, 2);
-      } catch (err) {
-        demoOutput.textContent = `Demo failed: ${err.message}`;
+        setDemoStatus("Guided episode completed successfully.");
+      } catch (error) {
+        demoOutput.textContent = `Guided episode failed: ${error.message}`;
+        setDemoStatus("Guided episode failed.");
       } finally {
-        demoBtn.disabled = false;
+        demoButton.disabled = false;
       }
     }
 
-    demoBtn.addEventListener('click', runDemoEpisode);
+    demoButton.addEventListener("click", runGuidedEpisode);
     loadTasks();
   </script>
 </body>
