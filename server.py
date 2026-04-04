@@ -29,6 +29,25 @@ POSTGRES_READY_TIMEOUT_SECONDS = int(os.getenv("POSTGRES_READY_TIMEOUT_SECONDS",
 POSTGRES_READY_RETRY_SECONDS = float(os.getenv("POSTGRES_READY_RETRY_SECONDS", "1.0"))
 ROOT_DIR = Path(__file__).resolve().parent
 INDEX_HTML_PATH = ROOT_DIR / "index.html"
+FAVICON_ICO_PATH = ROOT_DIR / "favicon.ico"
+FAVICON_SVG_PATH = ROOT_DIR / "favicon.svg"
+
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+    "Content-Security-Policy": (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com data:; "
+        "img-src 'self' data: https:; "
+        "connect-src 'self' https://lazerai-meddataops.hf.space; "
+        "object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+    ),
+}
 
 logger = logging.getLogger("meddataops.server")
 logging.basicConfig(
@@ -522,6 +541,10 @@ async def request_response_logging(request: Request, call_next):
         sid,
         duration_ms,
     )
+
+    for header_name, header_value in SECURITY_HEADERS.items():
+        response.headers.setdefault(header_name, header_value)
+
     return response
 
 
@@ -576,6 +599,27 @@ def landing_page() -> Response:
         "<html><body><h1>MedDataOps</h1><p>Landing page not found. Add index.html.</p></body></html>",
         status_code=200,
     )
+
+
+@app.head("/", include_in_schema=False)
+def landing_page_head() -> Response:
+    return Response(status_code=200, media_type="text/html")
+
+
+@app.get("/favicon.svg", include_in_schema=False)
+def favicon_svg() -> Response:
+    if FAVICON_SVG_PATH.exists():
+        return FileResponse(FAVICON_SVG_PATH, media_type="image/svg+xml")
+    return Response(status_code=204)
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon_ico() -> Response:
+    if FAVICON_ICO_PATH.exists():
+        return FileResponse(FAVICON_ICO_PATH, media_type="image/x-icon")
+    if FAVICON_SVG_PATH.exists():
+        return FileResponse(FAVICON_SVG_PATH, media_type="image/svg+xml")
+    return Response(status_code=204)
 
 
 @app.get("/health", response_model=HealthResponseModel)
