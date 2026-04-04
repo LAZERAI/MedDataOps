@@ -169,7 +169,7 @@ Then open:
 `inference.py` expects a chat-completions compatible endpoint.
 
 ```powershell
-$env:API_BASE_URL = "https://api-inference.huggingface.co/v1"
+$env:API_BASE_URL = "https://router.huggingface.co/v1"
 $env:MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
 $env:HF_TOKEN = "<your_hf_token>"
 python inference.py
@@ -309,16 +309,16 @@ Response:
 ```
 
 ## 9. Baseline Scores
-Illustrative placeholder baselines (Phase 3 review table format):
+Measured baseline from `inference.py`:
 
-| task | model | score | steps |
-|---|---|---:|---:|
-| triage_report | GPT-4o | 0.82 | 6 |
-| triage_report | Llama-3.1-8B-Instruct | 0.61 | 10 |
-| medication_summary | GPT-4o | 0.78 | 9 |
-| medication_summary | Llama-3.1-8B-Instruct | 0.57 | 13 |
-| icu_capacity | GPT-4o | 0.72 | 12 |
-| icu_capacity | Llama-3.1-8B-Instruct | 0.49 | 16 |
+| task | model | score | steps | status |
+|---|---|---:|---:|---|
+| triage_report | meta-llama/Llama-3.1-8B-Instruct | 0.6000 | 20 | ok |
+| medication_summary | meta-llama/Llama-3.1-8B-Instruct | 0.0000 | 7 | llm_failed |
+| icu_capacity | meta-llama/Llama-3.1-8B-Instruct | 0.0000 | 0 | llm_failed |
+
+Scores measured on 2026-04-04 against lazerai-meddataops.hf.space using meta-llama/Llama-3.1-8B-Instruct via HF Inference Router.
+Run note: Hugging Face Inference Providers returned HTTP 402 mid-run (depleted monthly credits), causing `llm_failed` statuses on later tasks.
 
 ## 10. Project Structure
 
