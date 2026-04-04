@@ -144,6 +144,22 @@ docker build -t meddataops .
 docker run --rm -p 7860:7860 meddataops
 ```
 
+### Run from Docker Hub image
+
+Image: https://hub.docker.com/r/lazerai/meddataops
+
+```bash
+docker pull lazerai/meddataops:latest
+docker run --rm -p 7860:7860 lazerai/meddataops:latest
+```
+
+Pinned tag for the latest validated release:
+
+```bash
+docker pull lazerai/meddataops:f313e2a
+docker run --rm -p 7860:7860 lazerai/meddataops:f313e2a
+```
+
 Then open:
 
 - root UI: `http://localhost:7860/`
