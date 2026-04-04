@@ -56,17 +56,19 @@ jobs:
 
           readme = pathlib.Path("README.md").read_text(encoding="utf-8")
           required = [
-              "## Quick Navigation",
-              "## 1. Objective and Scope",
-              "## 2. OpenEnv API Contract",
-              "## 3. Technical Architecture",
-              "## 4. RL Benchmark Tasks",
-              "## 5. Evaluation Methodology",
-              "## 6. OpenEnv Compliance Checklist",
-              "## 7. Setup and Run Instructions",
-              "## 8. API Usage Examples",
-              "## 9. Design Decisions and Trade-offs",
+              "Quick navigation:",
+              "## 1. Motivation",
+              "## 2. Environment Overview",
+              "## 3. Action Space",
+              "## 4. Observation Space",
+              "## 5. Tasks",
+              "## 6. Reward Function",
+              "## 7. Quick Start",
+              "## 8. API Reference",
+              "## 9. Baseline Scores",
               "## 10. Project Structure",
+              "## 11. Contributing",
+              "## 12. License",
           ]
 
           missing = [section for section in required if section not in readme]
