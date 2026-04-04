@@ -23,7 +23,7 @@ from meddataops.tasks import get_task, list_tasks
 
 
 API_VERSION = "1.0.0"
-DEFAULT_MAX_STEPS = int(os.getenv("MEDDATAOPS_MAX_STEPS", "16"))
+DEFAULT_MAX_STEPS = int(os.getenv("MEDDATAOPS_MAX_STEPS", "20"))
 SESSION_COOKIE_NAME = "session_id"
 POSTGRES_READY_TIMEOUT_SECONDS = int(os.getenv("POSTGRES_READY_TIMEOUT_SECONDS", "60"))
 POSTGRES_READY_RETRY_SECONDS = float(os.getenv("POSTGRES_READY_RETRY_SECONDS", "1.0"))
@@ -465,6 +465,13 @@ def _cleanup_all_sessions() -> None:
         _cleanup_session(session_id, context)
 
 
+def _drop_session_context(session_id: str) -> None:
+    with _sessions_lock:
+        context = _sessions.pop(session_id, None)
+    if context is not None:
+        _cleanup_session(session_id, context)
+
+
 def _install_sigterm_handler() -> None:
     global _sigterm_handler_installed
     if _sigterm_handler_installed:
@@ -621,13 +628,17 @@ def reset(
 
         observation = context.adapter.reset(task_id=payload.task_id, seed=payload.seed)
     except HTTPException:
+        _drop_session_context(session_id)
         raise
     except KeyError as exc:
+        _drop_session_context(session_id)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
+        _drop_session_context(session_id)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Reset failed for session=%s: %s", session_id, exc)
+        _drop_session_context(session_id)
         raise HTTPException(status_code=500, detail="Failed to reset environment") from exc
 
     response.set_cookie(key=SESSION_COOKIE_NAME, value=session_id, httponly=True, samesite="lax")
@@ -666,6 +677,7 @@ def step(
         raise
     except Exception as exc:
         logger.exception("Step failed for session=%s: %s", session_id, exc)
+        _drop_session_context(session_id)
         raise HTTPException(status_code=500, detail="Failed to execute step") from exc
 
     response.set_cookie(key=SESSION_COOKIE_NAME, value=session_id, httponly=True, samesite="lax")
@@ -698,6 +710,7 @@ def state(
         raise
     except Exception as exc:
         logger.exception("State retrieval failed for session=%s: %s", session_id, exc)
+        _drop_session_context(session_id)
         raise HTTPException(status_code=500, detail="Failed to fetch state") from exc
 
     response.set_cookie(key=SESSION_COOKIE_NAME, value=session_id, httponly=True, samesite="lax")

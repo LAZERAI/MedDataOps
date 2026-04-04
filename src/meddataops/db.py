@@ -801,10 +801,41 @@ class PostgresBackend:
     def __init__(self, dsn: str | None = None) -> None:
         self._dsn = dsn
 
+    @staticmethod
+    def _validate_read_only_query(query: str) -> str:
+        candidate = query.strip().rstrip(";")
+        if not candidate:
+            raise ValueError("Query cannot be empty.")
+
+        lowered = candidate.lower()
+        if not (lowered.startswith("select") or lowered.startswith("with")):
+            raise ValueError("Only SELECT/WITH statements are allowed.")
+
+        disallowed = (
+            "insert",
+            "update",
+            "delete",
+            "drop",
+            "alter",
+            "truncate",
+            "grant",
+            "revoke",
+            "create",
+        )
+        for keyword in disallowed:
+            if re.search(rf"\b{re.escape(keyword)}\b", lowered):
+                raise ValueError(f"Disallowed SQL keyword detected: '{keyword}'.")
+
+        if ";" in candidate:
+            raise ValueError("Multiple SQL statements are not allowed.")
+
+        return candidate
+
     def validate_query(self, query: str) -> QueryCheckResult:
-        stripped = query.strip()
-        if not stripped.lower().startswith("select"):
-            return QueryCheckResult(success=False, error="Only SELECT queries are allowed.")
+        try:
+            safe_query = self._validate_read_only_query(query)
+        except ValueError as exc:
+            return QueryCheckResult(success=False, error=str(exc))
 
         try:
             if self._dsn:
@@ -829,7 +860,7 @@ class PostgresBackend:
 
             with conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                    cur.execute(stripped)
+                    cur.execute(safe_query)
                     rows = cur.fetchmany(5) if cur.description is not None else []
 
             return QueryCheckResult(

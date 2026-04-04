@@ -1,31 +1,82 @@
 api_version: openenv/v1
+
 environment:
   id: meddataops
   name: MedDataOps
-  version: 0.1.0
-  description: Clinical data engineering RL environment for cleaning noisy hospital data and fixing SQL.
+  version: 1.0.0
+  description: A clinical data engineering RL environment where an agent cleans hospital datasets and fixes PostgreSQL queries.
   entrypoint: meddataops.env:MedDataOpsEnv
+  tags:
+    - openenv
+    - data-engineering
+    - healthcare
+    - sql
+    - data-cleaning
 
 interfaces:
   reset:
     request_model: meddataops.models.ResetRequest
     response_model: meddataops.models.EnvironmentState
   step:
-    request_model: meddataops.models.AgentAction
+    request_model: meddataops.models.ActionModel
     response_model: meddataops.models.StepResult
   state:
     response_model: meddataops.models.EnvironmentState
 
+action_space:
+  type: discrete
+  actions:
+    - action_type: clean_data
+      parameters_type: object
+      description: Apply one or more cleaning operations to the working dataset.
+    - action_type: run_query
+      parameters_type: object
+      description: Execute a read-only SQL query against the working tables.
+    - action_type: fix_query
+      parameters_type: object
+      description: Replace the current SQL query candidate with a corrected query.
+    - action_type: submit
+      parameters_type: object
+      description: Finalize the episode and compute the terminal reward.
+
+observation_space:
+  type: structured_json
+  fields:
+    - name: current_dataset_state
+      type: array<object>
+      description: Current table state summary and preview rows.
+    - name: current_sql_query
+      type: string
+      description: Current SQL query candidate under evaluation.
+    - name: error_messages
+      type: array<string>
+      description: Validation or execution errors produced by the previous action.
+    - name: task_description
+      type: string
+      description: Natural-language objective for the active task.
+    - name: step_number
+      type: integer
+      description: Current step index in the active episode.
+
 tasks:
-  - id: easy
+  - id: triage_report
     difficulty: easy
-    description: Trim and normalize vitals dataset, then fix a bad GROUP BY query.
-  - id: medium
+    description: Clean admissions triage data and repair ward-level patient count SQL.
+  - id: medication_summary
     difficulty: medium
-    description: Normalize lab units and dates, then fix a broken join query.
-  - id: hard
+    description: Normalize medication records and repair inflated join logic in prescription summary SQL.
+  - id: icu_capacity
     difficulty: hard
-    description: Standardize ICU telemetry rows and repair a window function query.
+    description: Merge heterogeneous ICU feeds and repair capacity aggregation query performance/correctness.
+
+episode:
+  max_steps: 20
+
+reward:
+  range:
+    min: 0.0
+    max: 1.0
+  description: Weighted combination of cleaning quality, SQL correctness, and efficiency.
 
 backend:
   type: postgresql

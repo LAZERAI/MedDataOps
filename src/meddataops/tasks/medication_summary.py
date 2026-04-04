@@ -3,7 +3,7 @@ from __future__ import annotations
 import random
 import re
 from collections import Counter
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import pandas as pd
@@ -48,6 +48,9 @@ BASE_DOSAGE_MG: dict[str, float] = {
     "atorvastatin": 40.0,
     "amoxicillin": 250.0,
 }
+
+
+MEDICATION_REFERENCE_DATETIME = datetime(2026, 4, 4, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def seed_medication_summary_dataset(
@@ -101,7 +104,11 @@ def seed_medication_summary_dataset(
         else:
             patient_id = rng.choice(valid_patient_ids)
 
-        prescribed_dt = faker.date_time_between(start_date="-3y", end_date="now", tzinfo=timezone.utc)
+        prescribed_dt = faker.date_time_between(
+            start_date=MEDICATION_REFERENCE_DATETIME - timedelta(days=365 * 3),
+            end_date=MEDICATION_REFERENCE_DATETIME,
+            tzinfo=timezone.utc,
+        )
         if rng.random() < unix_timestamp_ratio:
             prescribed_date: Any = int(prescribed_dt.timestamp())
         else:

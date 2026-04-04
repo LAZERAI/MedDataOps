@@ -35,7 +35,7 @@ services:
       POSTGRES_USER: meddataops
       POSTGRES_PASSWORD: meddataops
       MEDDATAOPS_POSTGRES_DSN: postgresql://meddataops:meddataops@postgres:5432/meddataops
-      MEDDATAOPS_MAX_STEPS: "16"
+      MEDDATAOPS_MAX_STEPS: "20"
       PYTHONPATH: /app/src
     ports:
       - "7860:7860"

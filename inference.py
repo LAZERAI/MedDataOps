@@ -24,8 +24,10 @@ if str(SRC_DIR) not in sys.path:
 TOTAL_RUNTIME_BUDGET_SECONDS = 19 * 60
 REQUEST_TIMEOUT_SECONDS = 45
 MAX_API_RETRIES = 4
-MAX_STEPS_PER_TASK = int(os.getenv("MAX_STEPS_PER_TASK", "16"))
+MAX_STEPS_PER_TASK = int(os.getenv("MAX_STEPS_PER_TASK", "20"))
 GLOBAL_RANDOM_SEED = int(os.getenv("GLOBAL_RANDOM_SEED", "42"))
+MODEL_TEMPERATURE = float(os.getenv("MODEL_TEMPERATURE", "0.0"))
+MODEL_TOP_P = float(os.getenv("MODEL_TOP_P", "1.0"))
 
 TASK_RUN_ORDER = [
     {"id": "triage_report", "aliases": ["easy"], "seed": 101},
@@ -624,23 +626,42 @@ def _call_llm_with_retry(
     model_name: str,
     messages: list[dict[str, str]],
     rng: random.Random,
+    deadline: float | None = None,
 ) -> str:
     last_error: Exception | None = None
 
     for attempt in range(1, MAX_API_RETRIES + 1):
+        timeout_seconds = float(REQUEST_TIMEOUT_SECONDS)
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 2.0:
+                raise RuntimeError("Global runtime budget exhausted before LLM request.")
+            timeout_seconds = min(timeout_seconds, max(2.0, remaining - 1.0))
+
         try:
             response = client.chat.completions.create(
                 model=model_name,
                 messages=messages,
-                temperature=0.1,
-                timeout=REQUEST_TIMEOUT_SECONDS,
+                temperature=MODEL_TEMPERATURE,
+                top_p=MODEL_TOP_P,
+                timeout=timeout_seconds,
             )
             return response.choices[0].message.content or "{}"
         except (APITimeoutError, APIConnectionError, RateLimitError, APIError) as exc:
             last_error = exc
             if attempt >= MAX_API_RETRIES:
                 break
+
+            if deadline is not None:
+                remaining_after_error = deadline - time.monotonic()
+                if remaining_after_error <= 2.0:
+                    break
+
             sleep_seconds = min(8.0, (2 ** (attempt - 1)) + rng.uniform(0.1, 0.7))
+            if deadline is not None:
+                sleep_seconds = min(sleep_seconds, max(0.0, deadline - time.monotonic() - 1.0))
+            if sleep_seconds <= 0.0:
+                break
             print(f"[retry] OpenAI call failed (attempt {attempt}/{MAX_API_RETRIES}): {exc}. Sleeping {sleep_seconds:.1f}s.")
             time.sleep(sleep_seconds)
 
@@ -910,6 +931,7 @@ def main() -> None:
                     model_name=model_name,
                     messages=messages,
                     rng=rng,
+                    deadline=deadline,
                 )
             except Exception as exc:
                 print(f"[error] LLM call failed on task {resolved_task_id}, step {step_idx}: {exc}")

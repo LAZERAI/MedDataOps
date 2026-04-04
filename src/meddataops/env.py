@@ -1,619 +1,424 @@
 from __future__ import annotations
 
+import copy
 import random
 import uuid
 from typing import Any
 
+import pandas as pd
+from pydantic import ValidationError
+
 from meddataops.config import settings
 from meddataops.db import PostgresBackend
 from meddataops.models import (
+    ActionModel,
     ActionType,
     AgentAction,
     EnvironmentState,
-    import os
+    OpenEnvActionType,
     ResetRequest,
     StepResult,
     TaskPublic,
-    TaskSpec,
-    import psycopg2
-    from psycopg2 import OperationalError, sql
-    from psycopg2.extensions import connection as PsycopgConnection
-    from psycopg2.extras import Json, RealDictCursor
-    from pydantic import ValidationError
-
+)
+from meddataops.scoring import normalize_sql
 from meddataops.tasks import get_task, list_tasks
-        ActionModel,
-        HistoryEntryModel,
-        ObservationModel,
-        OpenEnvActionType,
-        RewardModel,
-        StateModel,
+from meddataops.tasks import icu_capacity, medication_summary, triage_report
+
+
+class MedDataOpsEnv:
+    """OpenEnv-compatible environment for MedDataOps.
+
+    Required public methods:
+    - reset(...) -> EnvironmentState
+    - step(...) -> StepResult
+    - state() -> EnvironmentState
+    """
+
+    SUPPORTED_ACTIONS = {
+        "clean_data",
+        "run_query",
+        "fix_query",
+        "fix_sql",
+        "submit",
+        "noop",
+    }
+
+    def __init__(
+        self,
         postgres_backend: PostgresBackend | None = None,
         max_steps: int | None = None,
         seed: int | None = None,
-    from meddataops.scoring import RewardCalculator
+    ) -> None:
         self._rng = random.Random(seed)
-        self._db = postgres_backend or PostgresBackend(settings.postgres_dsn)
+        self._query_backend = postgres_backend or PostgresBackend(dsn=settings.postgres_dsn)
         self._max_steps = max_steps or settings.max_steps
-
-        """OpenEnv-compatible environment for clinical data cleaning and SQL repair.
-
-        Public interface:
-        - reset() -> ObservationModel
-        - step(action: ActionModel) -> tuple[ObservationModel, RewardModel, bool, dict[str, Any]]
-        - state() -> StateModel
-        """
-
-        TASK_ALIASES: dict[str, str] = {
-            "triage_report": "easy",
-            "medication_summary": "medium",
-            "icu_capacity": "hard",
-        }
-
-        TASK_TABLE_MAP: dict[str, str] = {
-            "easy": "admissions",
-            "medium": "lab_results",
-            "hard": "icu_events",
-        }
-
-        TABLE_COLUMNS: dict[str, list[str]] = {
-            "admissions": ["patient_id", "heart_rate", "ward", "encounter_id", "admit_ts"],
-            "lab_results": ["encounter_id", "test_code", "result_value", "unit", "taken_at"],
-            "icu_events": ["patient_id", "event_ts", "heart_rate", "spo2"],
-        }
 
         self._episode_id: str = ""
         self._step_index: int = 0
-            max_steps: int = 20,
+        self._done: bool = False
+        self._reward: float = 0.0
 
-            query_cost_threshold: float = 1000.0,
-        self._task: TaskSpec | None = None
+        self._task = None
         self._candidate_rows: list[dict[str, Any]] = []
-            self._max_steps = max_steps
-            self._reward_calculator = RewardCalculator(query_cost_threshold=query_cost_threshold)
+        self._current_query: str = ""
+        self._last_query_rows: list[dict[str, Any]] = []
+        self._last_sql_error: str | None = None
 
-            self._conn: PsycopgConnection | None = None
-            self._working_table_name: str = ""
         self._solved_cleaning: bool = False
         self._solved_sql: bool = False
-        self._last_sql_error: str | None = None
-            self._cumulative_reward: float = 0.0
-    def reset(self, request: ResetRequest | None = None) -> EnvironmentState:
-            self._unnecessary_actions: int = 0
-        request = request or ResetRequest()
 
-            self._candidate_clean_rows: list[dict[str, Any]] = []
-            self._current_query: str = ""
-            self._last_query_rows: list[dict[str, Any]] = []
-            self._last_query_plan_cost: float | None = None
+    def reset(
+        self,
+        request: ResetRequest | dict[str, Any] | str | None = None,
+        task_id: str | None = None,
+        seed: int | None = None,
+    ) -> EnvironmentState:
+        resolved_task_id, resolved_seed = self._coerce_reset_inputs(request=request, task_id=task_id, seed=seed)
 
-            self._latest_reward: RewardModel = self._zero_reward()
-            self._history: list[HistoryEntryModel] = []
-            self._error_messages: list[str] = []
-        task_id = request.task_id or self._rng.choice(list_tasks())
-            self._solved_query: bool = False
+        if resolved_seed is not None:
+            self._rng.seed(resolved_seed)
+
+        chosen_task = resolved_task_id or self._rng.choice(list_tasks())
+        self._task = get_task(chosen_task)
 
         self._episode_id = str(uuid.uuid4())
-        def reset(self, task_id: str | None = None, seed: int | None = None) -> ObservationModel:
-            """Start a new episode and return the initial observation.
+        self._step_index = 0
+        self._done = False
+        self._reward = 0.0
 
-            On reset:
-            - Opens a fresh PostgreSQL session (episode isolation boundary).
-            - Creates per-episode temporary tables.
-            - Loads task dataset into temp working tables.
-            - Initializes step counters and query state.
-            """
-            if seed is not None:
-                self._rng.seed(seed)
+        self._candidate_rows = self._deep_rows(self._task.dirty_rows)
+        self._current_query = self._task.broken_sql
+        self._last_query_rows = []
+        self._last_sql_error = None
 
-            resolved_task_id = self._resolve_task_id(task_id)
-            self._task = get_task(resolved_task_id)
+        self._solved_cleaning = False
+        self._solved_sql = False
 
-            self._connect_new_episode()
+        return self._build_state()
 
-            self._episode_id = str(uuid.uuid4())
-            self._step_index = 0
-            self._cumulative_reward = 0.0
-            self._done = False
-            self._unnecessary_actions = 0
+    def step(self, action: AgentAction | ActionModel | dict[str, Any]) -> StepResult:
+        self._require_active_episode()
 
-            self._working_table_name = f"meddataops_work_{uuid.uuid4().hex[:10]}"
-
-            self._candidate_clean_rows = list(self._task.dirty_rows)
-            self._current_query = self._task.broken_sql
-            self._last_query_rows = []
-            self._last_query_plan_cost = None
-
-            self._latest_reward = self._zero_reward()
-            self._history = []
-            self._error_messages = []
-            self._solved_cleaning = False
-            self._solved_query = False
-            self._last_sql_error = None
-
-            self._create_temp_tables()
-            self._load_rows_for_task(self._task.dirty_rows)
-            self._load_rows_into_working_table(self._task.dirty_rows)
-
-            return self._build_observation()
-
-        def step(self, action: ActionModel) -> tuple[ObservationModel, RewardModel, bool, dict[str, Any]]:
-            """Apply one action and return (observation, reward, done, info)."""
-            self._ensure_active_episode()
-
-            if self._done:
-                return self._build_observation(), self._latest_reward, True, {
-                    "message": "Episode already completed. Call reset() to start a new episode."
-                }
-
-            try:
-                if not isinstance(action, ActionModel):
-                    action = ActionModel.model_validate(action)
-            except ValidationError as exc:
-                self._error_messages = [f"Invalid action payload: {exc}"]
-                penalty_reward = self._reward_calculator.calculate(
-                    candidate_clean_rows=self._candidate_clean_rows,
-                    expected_clean_rows=self._task.expected_clean_rows if self._task else [],
-                    candidate_query_rows=self._last_query_rows,
-                    expected_query_rows=[],
-                    sql_error="invalid_action",
-                    query_plan_cost=self._last_query_plan_cost,
-                    unnecessary_actions=1,
-                )
-                self._latest_reward = penalty_reward
-                self._cumulative_reward += penalty_reward.total
-                return self._build_observation(), penalty_reward, False, {"error": str(exc)}
-
-            self._error_messages = []
-            info: dict[str, Any] = {}
-            reward = self._zero_reward()
-            unnecessary = False
-
-            if action.action_type == OpenEnvActionType.CLEAN_DATA:
-                info, unnecessary = self._handle_clean_data(action.parameters)
-            elif action.action_type == OpenEnvActionType.RUN_QUERY:
-                info, unnecessary = self._handle_run_query(action.parameters)
-            elif action.action_type == OpenEnvActionType.FIX_QUERY:
-                info, unnecessary = self._handle_fix_query(action.parameters)
-            elif action.action_type == OpenEnvActionType.SUBMIT:
-                reward, info = self._handle_submit()
-            else:
-                unnecessary = True
-                self._error_messages.append(f"Unsupported action type: {action.action_type}")
-                info = {"error": f"Unsupported action type: {action.action_type}"}
-
-            if unnecessary:
-                self._unnecessary_actions += 1
-
-            self._step_index += 1
-
-            if self._step_index >= self._max_steps and not self._done:
-                reward, forced_info = self._handle_submit(force_reason="max_steps_reached")
-                info["termination"] = "max_steps_reached"
-                info["forced_submit"] = forced_info
-
-            if action.action_type != OpenEnvActionType.SUBMIT and not self._done:
-                reward = self._zero_reward()
-
-            observation = self._build_observation()
-            self._history.append(
-                HistoryEntryModel(
-                    step_number=self._step_index,
-                    action=action,
-                    observation=observation,
-                    reward=reward,
-                )
+        if self._done:
+            return StepResult(
+                observation=self._build_state(),
+                reward=0.0,
+                done=True,
+                info={"message": "Episode already completed. Call reset() to start a new one."},
             )
-            self._latest_reward = reward
-            self._cumulative_reward += reward.total
 
-            return observation, reward, self._done, info
+        normalized = self._normalize_action(action)
+        action_type = normalized["action_type"]
+        parameters = normalized["parameters"]
 
-        def state(self) -> StateModel:
-            """Return full internal environment state for the active episode."""
-            self._ensure_active_episode()
+        info: dict[str, Any] = {"action_type": action_type}
+        self._last_sql_error = None
 
-            assert self._task is not None
-            task_public = TaskPublic(
+        if action_type == "clean_data":
+            operations = parameters.get("operations", [])
+            if not isinstance(operations, list):
+                operations = []
+            self._candidate_rows = self._apply_operations(self._candidate_rows, operations)
+            info["operations_applied"] = len(operations)
+
+        elif action_type in {"run_query", "fix_query", "fix_sql"}:
+            query = parameters.get("query")
+            if query is None and action_type == "run_query":
+                query = self._current_query
+
+            if not isinstance(query, str) or not query.strip():
+                self._last_sql_error = f"{action_type} requires a non-empty query string."
+                info["query_valid"] = False
+            else:
+                normalized_query = query.strip()
+                if action_type in {"fix_query", "fix_sql"}:
+                    self._current_query = normalized_query
+
+                check = self._query_backend.validate_query(normalized_query)
+                info["query_valid"] = bool(check.success)
+                info["query_check"] = check.model_dump()
+                if check.success:
+                    self._last_query_rows = self._deep_rows(check.sample_rows)
+                    self._last_sql_error = None
+                else:
+                    self._last_sql_error = check.error or "Query validation failed."
+
+        elif action_type == "submit":
+            self._reward = self._compute_submission_score()
+            self._done = True
+            info["message"] = "Submission accepted."
+
+        elif action_type == "noop":
+            info["message"] = "No operation performed."
+
+        self._step_index += 1
+        if self._step_index >= self._max_steps and not self._done:
+            self._reward = self._compute_submission_score()
+            self._done = True
+            info["termination"] = "max_steps_reached"
+
+        if action_type != "submit" and "termination" not in info:
+            self._reward = 0.0
+
+        self._solved_sql = self._is_query_correct()
+        self._solved_cleaning = self._rows_equivalent(self._candidate_rows, self._task.expected_clean_rows)
+
+        return StepResult(
+            observation=self._build_state(),
+            reward=float(self._reward),
+            done=self._done,
+            info=info,
+        )
+
+    def state(self) -> EnvironmentState:
+        self._require_active_episode()
+        return self._build_state()
+
+    def close(self) -> None:
+        return
+
+    def _coerce_reset_inputs(
+        self,
+        *,
+        request: ResetRequest | dict[str, Any] | str | None,
+        task_id: str | None,
+        seed: int | None,
+    ) -> tuple[str | None, int | None]:
+        req_task: str | None = None
+        req_seed: int | None = None
+
+        if isinstance(request, ResetRequest):
+            req_task = request.task_id
+            req_seed = request.seed
+        elif isinstance(request, dict):
+            parsed = ResetRequest.model_validate(request)
+            req_task = parsed.task_id
+            req_seed = parsed.seed
+        elif isinstance(request, str):
+            req_task = request
+        elif request is not None:
+            raise ValueError(f"Unsupported reset payload type: {type(request).__name__}")
+
+        final_task = task_id if task_id is not None else req_task
+        final_seed = seed if seed is not None else req_seed
+        return final_task, final_seed
+
+    def _normalize_action(self, action: AgentAction | ActionModel | dict[str, Any]) -> dict[str, Any]:
+        if isinstance(action, ActionModel):
+            return {
+                "action_type": action.action_type.value,
+                "parameters": dict(action.parameters),
+            }
+
+        if isinstance(action, AgentAction):
+            mapped = {
+                ActionType.CLEAN_DATA.value: "clean_data",
+                ActionType.FIX_SQL.value: "fix_query",
+                ActionType.SUBMIT.value: "submit",
+                ActionType.NOOP.value: "noop",
+            }
+            return {
+                "action_type": mapped.get(action.action_type.value, "noop"),
+                "parameters": dict(action.payload),
+            }
+
+        try:
+            payload = dict(action)
+        except Exception as exc:  # pragma: no cover
+            raise ValueError(f"Action payload must be dict-like: {exc}") from exc
+
+        action_type = str(payload.get("action_type", "")).strip().lower()
+        parameters = payload.get("parameters", payload.get("payload", {}))
+
+        if not isinstance(parameters, dict):
+            parameters = {}
+
+        alias_map = {
+            "fix_sql": "fix_query",
+            "query": "run_query",
+            "runquery": "run_query",
+            "submit_answer": "submit",
+        }
+        action_type = alias_map.get(action_type, action_type)
+
+        if action_type not in self.SUPPORTED_ACTIONS:
+            raise ValueError(f"Unsupported action_type: {action_type}")
+
+        return {"action_type": action_type, "parameters": parameters}
+
+    def _require_active_episode(self) -> None:
+        if self._task is None:
+            raise RuntimeError("No active episode. Call reset() before step() or state().")
+
+    def _build_state(self) -> EnvironmentState:
+        self._require_active_episode()
+        assert self._task is not None
+
+        return EnvironmentState(
+            episode_id=self._episode_id,
+            step_index=self._step_index,
+            max_steps=self._max_steps,
+            done=self._done,
+            reward=float(self._reward),
+            task=TaskPublic(
                 id=self._task.id,
                 name=self._task.name,
                 difficulty=self._task.difficulty,
                 description=self._task.description,
-                hints=self._task.hints,
-            )
+                hints=list(self._task.hints),
+            ),
+            dirty_rows=self._deep_rows(self._candidate_rows),
+            broken_sql=self._current_query,
+            last_sql_error=self._last_sql_error,
+            solved_cleaning=self._solved_cleaning,
+            solved_sql=self._solved_sql,
+        )
 
-            return StateModel(
-                episode_id=self._episode_id,
-                step_number=self._step_index,
-                max_steps=self._max_steps,
-                done=self._done,
-                current_task=task_public,
-                observation=self._build_observation(),
-                latest_reward=self._latest_reward,
-                cumulative_reward=self._cumulative_reward,
-                solved_cleaning=self._solved_cleaning,
-                solved_query=self._solved_query,
-                last_sql_error=self._last_sql_error,
-                history=list(self._history),
-            )
+    def _apply_operations(self, rows: list[dict[str, Any]], operations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        updated = self._deep_rows(rows)
 
-        def close(self) -> None:
-            """Close DB resources for the current episode."""
-            if self._conn is not None:
-                try:
-                    self._conn.close()
-                finally:
-                    self._conn = None
+        for operation in operations:
+            if not isinstance(operation, dict):
+                continue
+            op = str(operation.get("operation", "")).strip().lower()
 
-        def __del__(self) -> None:
-            self.close()
+            if op == "normalize_strings":
+                columns = operation.get("columns", [])
+                case_mode = str(operation.get("case", "lower")).strip().lower()
+                for row in updated:
+                    for column in columns:
+                        value = row.get(column)
+                        if value is None:
+                            continue
+                        text = str(value).strip()
+                        if case_mode == "upper":
+                            row[column] = text.upper()
+                        elif case_mode == "title":
+                            row[column] = text.title()
+                        else:
+                            row[column] = text.lower()
 
-        def _resolve_task_id(self, task_id: str | None) -> str:
-            if task_id is None:
-                return self._rng.choice(list_tasks())
+            elif op == "fix_nulls":
+                columns = operation.get("columns", [])
+                strategy = str(operation.get("strategy", "mode")).strip().lower()
+                for column in columns:
+                    values = [row.get(column) for row in updated if row.get(column) not in (None, "", "N/A", "n/a")]
+                    replacement: Any = None
+                    if values:
+                        if strategy == "mean":
+                            nums = []
+                            for value in values:
+                                try:
+                                    nums.append(float(value))
+                                except (TypeError, ValueError):
+                                    continue
+                            if nums:
+                                replacement = sum(nums) / len(nums)
+                        elif strategy == "mode":
+                            replacement = max(set(values), key=values.count)
+                        elif strategy == "forward_fill":
+                            replacement = values[-1]
 
-            if task_id in self.TASK_ALIASES:
-                return self.TASK_ALIASES[task_id]
+                    for row in updated:
+                        if row.get(column) in (None, "", "N/A", "n/a"):
+                            if strategy == "drop":
+                                row[column] = None
+                            elif replacement is not None:
+                                row[column] = replacement
 
-            if task_id in list_tasks():
-                return task_id
+                if strategy == "drop":
+                    updated = [
+                        row
+                        for row in updated
+                        if all(row.get(column) not in (None, "", "N/A", "n/a") for column in columns)
+                    ]
 
-            aliases = ", ".join(sorted(self.TASK_ALIASES.keys()))
-            canonical = ", ".join(sorted(list_tasks()))
-            raise ValueError(
-                f"Unknown task_id '{task_id}'. Supported canonical ids: {canonical}. Supported aliases: {aliases}."
-            )
-
-        def _connection_kwargs(self) -> dict[str, Any]:
-            host = os.getenv("POSTGRES_HOST")
-            dbname = os.getenv("POSTGRES_DB")
-            user = os.getenv("POSTGRES_USER")
-            password = os.getenv("POSTGRES_PASSWORD")
-            port_raw = os.getenv("POSTGRES_PORT", "5432")
-
-            missing = [
-                name
-                for name, value in {
-                    "POSTGRES_HOST": host,
-                    "POSTGRES_DB": dbname,
-                    "POSTGRES_USER": user,
-                    "POSTGRES_PASSWORD": password,
-                }.items()
-                if not value
-            ]
-            if missing:
-                raise RuntimeError(f"Missing required PostgreSQL environment variables: {', '.join(missing)}")
-
-            try:
-                port = int(port_raw)
-            except ValueError as exc:
-                raise RuntimeError("POSTGRES_PORT must be an integer.") from exc
-
-            return {
-                "host": host,
-                "dbname": dbname,
-                "user": user,
-                "password": password,
-                "port": port,
-                "connect_timeout": 5,
-            }
-
-        def _connect_new_episode(self) -> None:
-            self.close()
-
-            try:
-                self._conn = psycopg2.connect(**self._connection_kwargs())
-                self._conn.autocommit = True
-            except OperationalError as exc:
-                raise RuntimeError(f"Failed to connect to PostgreSQL: {exc}") from exc
-
-        def _ensure_active_episode(self) -> None:
-            if self._task is None or self._conn is None:
-                raise RuntimeError("No active episode. Call reset() before step() or state().")
-
-        def _create_temp_tables(self) -> None:
-            self._ensure_active_episode()
-            assert self._conn is not None
-
-            with self._conn.cursor() as cur:
-                cur.execute(
-                    """
-                    CREATE TEMP TABLE admissions (
-                        patient_id TEXT,
-                        heart_rate TEXT,
-                        ward TEXT,
-                        encounter_id TEXT,
-                        admit_ts TEXT
-                    ) ON COMMIT PRESERVE ROWS;
-                    """
-                )
-                cur.execute(
-                    """
-                    CREATE TEMP TABLE lab_results (
-                        encounter_id TEXT,
-                        test_code TEXT,
-                        result_value TEXT,
-                        unit TEXT,
-                        taken_at TEXT
-                    ) ON COMMIT PRESERVE ROWS;
-                    """
-                )
-                cur.execute(
-                    """
-                    CREATE TEMP TABLE icu_events (
-                        patient_id TEXT,
-                        event_ts TEXT,
-                        heart_rate TEXT,
-                        spo2 TEXT
-                    ) ON COMMIT PRESERVE ROWS;
-                    """
-                )
-                cur.execute(
-                    sql.SQL(
-                        "CREATE TEMP TABLE {} (row_id SERIAL PRIMARY KEY, payload JSONB NOT NULL) ON COMMIT PRESERVE ROWS;"
-                    ).format(sql.Identifier(self._working_table_name))
-                )
-
-        def _load_rows_for_task(self, rows: list[dict[str, Any]]) -> None:
-            self._ensure_active_episode()
-            assert self._task is not None
-            assert self._conn is not None
-
-            table_name = self.TASK_TABLE_MAP[self._task.id]
-            columns = self.TABLE_COLUMNS[table_name]
-
-            with self._conn.cursor() as cur:
-                cur.execute(sql.SQL("TRUNCATE TABLE {}").format(sql.Identifier(table_name)))
-
-                for row in rows:
-                    values = [None if row.get(column) is None else str(row.get(column)) for column in columns]
-                    cur.execute(
-                        sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
-                            sql.Identifier(table_name),
-                            sql.SQL(", ").join(sql.Identifier(column) for column in columns),
-                            sql.SQL(", ").join(sql.Placeholder() for _ in columns),
-                        ),
-                        values,
-                    )
-
-            if self._task.id == "medium":
-                self._seed_medium_admissions(rows)
-
-        def _seed_medium_admissions(self, source_rows: list[dict[str, Any]]) -> None:
-            self._ensure_active_episode()
-            assert self._conn is not None
-
-            seen: set[str] = set()
-            rows_to_insert: list[tuple[str, str]] = []
-            for row in source_rows:
-                encounter_id = str(row.get("encounter_id", "")).strip()
-                if not encounter_id or encounter_id in seen:
+            elif op == "fix_dtypes":
+                col_map = operation.get("columns", {})
+                if not isinstance(col_map, dict):
                     continue
+                for row in updated:
+                    for column, dtype in col_map.items():
+                        value = row.get(column)
+                        if value is None:
+                            continue
+                        try:
+                            if dtype == "int":
+                                row[column] = int(float(value))
+                            elif dtype == "float":
+                                row[column] = float(value)
+                            elif dtype == "string":
+                                row[column] = str(value)
+                            elif dtype == "date":
+                                parsed = pd.to_datetime(value, errors="coerce", utc=True)
+                                if not pd.isna(parsed):
+                                    row[column] = parsed.strftime("%Y-%m-%d")
+                        except (TypeError, ValueError):
+                            continue
 
-                seen.add(encounter_id)
-                raw_ts = str(row.get("taken_at", "2026-03-01 08:00:00"))
-                normalized_ts = raw_ts.replace("T", " ").replace("/", "-").strip()[:19]
-                rows_to_insert.append((encounter_id, normalized_ts))
+            elif op == "remove_duplicates":
+                columns = operation.get("columns", [])
+                if not columns:
+                    continue
+                deduped: dict[tuple[Any, ...], dict[str, Any]] = {}
+                for row in updated:
+                    signature = tuple(row.get(column) for column in columns)
+                    deduped.setdefault(signature, row)
+                updated = list(deduped.values())
 
-            with self._conn.cursor() as cur:
-                cur.execute("TRUNCATE TABLE admissions")
-                for encounter_id, admit_ts in rows_to_insert:
-                    cur.execute(
-                        "INSERT INTO admissions (encounter_id, admit_ts) VALUES (%s, %s)",
-                        (encounter_id, admit_ts),
-                    )
+        return updated
 
-        def _load_rows_into_working_table(self, rows: list[dict[str, Any]]) -> None:
-            self._ensure_active_episode()
-            assert self._conn is not None
+    def _compute_submission_score(self) -> float:
+        assert self._task is not None
 
-            with self._conn.cursor() as cur:
-                cur.execute(sql.SQL("TRUNCATE TABLE {}").format(sql.Identifier(self._working_table_name)))
-                for row in rows:
-                    cur.execute(
-                        sql.SQL("INSERT INTO {} (payload) VALUES (%s)").format(sql.Identifier(self._working_table_name)),
-                        (Json(row),),
-                    )
+        task_id = self._task.id
+        query_rows = self._candidate_query_rows(task_id)
 
-        def _fetch_working_rows(self) -> list[dict[str, Any]]:
-            self._ensure_active_episode()
-            assert self._conn is not None
-
-            with self._conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(
-                    sql.SQL("SELECT payload FROM {} ORDER BY row_id ASC").format(sql.Identifier(self._working_table_name))
-                )
-                result = cur.fetchall()
-
-            rows: list[dict[str, Any]] = []
-            for row in result:
-                payload = row.get("payload")
-                if isinstance(payload, dict):
-                    rows.append(payload)
-
-            return rows
-
-        def _validate_select_query(self, query: str) -> str:
-            normalized = query.strip()
-            if not normalized:
-                raise ValueError("Query cannot be empty.")
-
-            lowered = normalized.lower()
-            if not lowered.startswith("select"):
-                raise ValueError("Only SELECT statements are allowed.")
-
-            if ";" in normalized.rstrip(";"):
-                raise ValueError("Multiple SQL statements are not allowed.")
-
-            return normalized
-
-        def _execute_query(
-            self,
-            query: str,
-            include_plan: bool = False,
-        ) -> tuple[list[dict[str, Any]], str | None, float | None]:
-            self._ensure_active_episode()
-            assert self._conn is not None
-
-            try:
-                safe_query = self._validate_select_query(query)
-            except ValueError as exc:
-                return [], str(exc), None
-
-            try:
-                plan_cost: float | None = None
-                with self._conn.cursor(cursor_factory=RealDictCursor) as cur:
-                    if include_plan:
-                        cur.execute(f"EXPLAIN (FORMAT JSON) {safe_query}")
-                        plan_row = cur.fetchone() or {}
-                        plan_payload = plan_row.get("QUERY PLAN")
-                        plan_cost = self._reward_calculator.query_plan_total_cost(plan_payload)
-
-                    cur.execute(safe_query)
-                    rows = cur.fetchall() if cur.description is not None else []
-                    result_rows = [dict(row) for row in rows]
-
-                return result_rows, None, plan_cost
-            except Exception as exc:
-                return [], str(exc), None
-
-        def _handle_clean_data(self, parameters: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-            rows = parameters.get("rows")
-            if not isinstance(rows, list) or any(not isinstance(item, dict) for item in rows):
-                message = "clean_data requires parameters.rows as list[dict]."
-                self._error_messages.append(message)
-                return {"error": message}, True
-
-            try:
-                self._candidate_clean_rows = rows
-                self._load_rows_for_task(rows)
-                self._load_rows_into_working_table(rows)
-            except Exception as exc:
-                message = f"Failed to load cleaned rows: {exc}"
-                self._error_messages.append(message)
-                return {"error": message}, True
-
-            assert self._task is not None
-            clean_score = self._reward_calculator.data_clean_score(rows, self._task.expected_clean_rows)
-            self._solved_cleaning = clean_score >= 0.999
-
-            return {
-                "status": "cleaned",
-                "rows_loaded": len(rows),
-                "clean_score": clean_score,
-                "solved_cleaning": self._solved_cleaning,
-            }, False
-
-        def _handle_fix_query(self, parameters: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-            query = parameters.get("query")
-            if not isinstance(query, str) or not query.strip():
-                message = "fix_query requires a non-empty parameters.query string."
-                self._error_messages.append(message)
-                return {"error": message}, True
-
-            self._current_query = query
-            self._last_sql_error = None
-            return {"status": "query_updated"}, False
-
-        def _handle_run_query(self, parameters: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-            query_override = parameters.get("query")
-            if query_override is not None:
-                if not isinstance(query_override, str) or not query_override.strip():
-                    message = "run_query parameters.query must be a non-empty string when provided."
-                    self._error_messages.append(message)
-                    return {"error": message}, True
-                self._current_query = query_override
-
-            rows, sql_error, plan_cost = self._execute_query(self._current_query, include_plan=True)
-            self._last_query_rows = rows
-            self._last_sql_error = sql_error
-            self._last_query_plan_cost = plan_cost
-
-            if sql_error:
-                self._error_messages.append(sql_error)
-                self._solved_query = False
-                return {"error": sql_error}, True
-
-            assert self._task is not None
-            expected_rows, expected_error, _ = self._execute_query(self._task.expected_sql, include_plan=False)
-            query_score = self._reward_calculator.sql_correctness_score(rows, expected_rows, sql_error=expected_error)
-            self._solved_query = query_score >= 0.999
-
-            info: dict[str, Any] = {
-                "status": "query_ran",
-                "row_count": len(rows),
-                "query_score": query_score,
-                "efficiency_cost": plan_cost,
-                "solved_query": self._solved_query,
-            }
-            if expected_error:
-                info["expected_query_error"] = expected_error
-
-            return info, False
-
-        def _handle_submit(self, force_reason: str | None = None) -> tuple[RewardModel, dict[str, Any]]:
-            assert self._task is not None
-
-            current_rows, current_error, plan_cost = self._execute_query(self._current_query, include_plan=True)
-            self._last_query_rows = current_rows
-            self._last_sql_error = current_error
-            self._last_query_plan_cost = plan_cost
-
-            expected_rows, expected_error, _ = self._execute_query(self._task.expected_sql, include_plan=False)
-            grader_sql_error = current_error or expected_error
-
-            reward = self._reward_calculator.calculate(
-                candidate_clean_rows=self._candidate_clean_rows,
-                expected_clean_rows=self._task.expected_clean_rows,
-                candidate_query_rows=current_rows,
-                expected_query_rows=expected_rows,
-                sql_error=grader_sql_error,
-                query_plan_cost=plan_cost,
-                unnecessary_actions=self._unnecessary_actions,
+        if task_id == "triage_report":
+            score = triage_report.score_triage_report(self._candidate_rows, query_rows)
+        elif task_id == "medication_summary":
+            score = medication_summary.score_medication_summary(self._candidate_rows, query_rows)
+        elif task_id == "icu_capacity":
+            score = icu_capacity.score_icu_capacity(
+                self._candidate_rows,
+                query_rows,
+                agent_query=self._current_query,
             )
+        else:
+            score = 0.0
 
-            self._solved_cleaning = reward.data_clean_score >= 0.999
-            self._solved_query = reward.query_correct_score >= 0.999
-            self._done = True
+        return float(max(0.0, min(1.0, score)))
 
-            info: dict[str, Any] = {
-                "submitted": True,
-                "reward": reward.model_dump(),
-                "solved_cleaning": self._solved_cleaning,
-                "solved_query": self._solved_query,
-                "unnecessary_actions": self._unnecessary_actions,
-            }
-            if force_reason:
-                info["force_reason"] = force_reason
-            if grader_sql_error:
-                info["grader_sql_error"] = grader_sql_error
+    def _candidate_query_rows(self, task_id: str) -> list[dict[str, Any]]:
+        if self._is_query_correct():
+            if task_id == "triage_report":
+                return self._deep_rows(getattr(triage_report, "_TRIAGE_EXPECTED_QUERY_RESULT", []))
+            if task_id == "medication_summary":
+                return self._deep_rows(medication_summary.MEDICATION_SUMMARY_GROUND_TRUTH_EXPECTED_RESULT)
+            if task_id == "icu_capacity":
+                return self._deep_rows(icu_capacity.ICU_CAPACITY_GROUND_TRUTH_EXPECTED_RESULT)
+        return self._deep_rows(self._last_query_rows)
 
-            return reward, info
+    def _is_query_correct(self) -> bool:
+        assert self._task is not None
+        return normalize_sql(self._current_query) == normalize_sql(self._task.expected_sql)
 
-        def _build_observation(self) -> ObservationModel:
-            dataset_state: list[dict[str, Any]] = []
-            try:
-                if self._conn is not None and self._working_table_name:
-                    dataset_state = self._fetch_working_rows()
-            except Exception as exc:
-                self._error_messages.append(f"Failed to fetch working rows: {exc}")
+    @staticmethod
+    def _deep_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return copy.deepcopy(rows)
 
-            task_description = self._task.description if self._task is not None else ""
+    @staticmethod
+    def _rows_equivalent(left: list[dict[str, Any]], right: list[dict[str, Any]]) -> bool:
+        def canonical(rows: list[dict[str, Any]]) -> list[tuple[tuple[str, str], ...]]:
+            normalized = []
+            for row in rows:
+                row_items = []
+                for key, value in sorted(row.items(), key=lambda item: item[0]):
+                    row_items.append((str(key), str(value).strip().lower() if value is not None else ""))
+                normalized.append(tuple(row_items))
+            return sorted(normalized)
 
-            return ObservationModel(
-                current_dataset_state=dataset_state,
-                current_sql_query=self._current_query,
-                error_messages=list(self._error_messages),
-                task_description=task_description,
-                step_number=self._step_index,
-            )
+        return canonical(left) == canonical(right)
 
-        @staticmethod
-        def _zero_reward() -> RewardModel:
-            return RewardModel(
-                data_clean_score=0.0,
-                query_correct_score=0.0,
-                efficiency_bonus=0.0,
-                step_penalty=0.0,
-                total=0.0,
-            )
+
+__all__ = ["MedDataOpsEnv"]

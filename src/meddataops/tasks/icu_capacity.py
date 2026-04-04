@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import random
 import re
-import uuid
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -29,6 +28,9 @@ _HOSPITAL_B_TO_UNIT = {row["ward_code"]: row["icu_unit"] for row in HOSPITAL_B_W
 
 
 ICU_UNITS = sorted({row["icu_unit"] for row in HOSPITAL_B_WARD_CODE_MAP_TABLE})
+
+
+ICU_SEED_REFERENCE_TIME = datetime(2026, 4, 4, 0, 0, 0, tzinfo=timezone.utc)
 
 
 UNIT_CAPACITY: dict[str, int] = {
@@ -91,7 +93,11 @@ def seed_hospital_a_patients(
 
     rows: list[dict[str, Any]] = []
     for index in range(row_count):
-        admitted_at = faker.date_time_between(start_date="-45d", end_date="now", tzinfo=timezone.utc)
+        admitted_at = faker.date_time_between(
+            start_date=ICU_SEED_REFERENCE_TIME - timedelta(days=45),
+            end_date=ICU_SEED_REFERENCE_TIME,
+            tzinfo=timezone.utc,
+        )
         rows.append(
             {
                 "patient_id": 200000 + index,
@@ -141,7 +147,11 @@ def seed_hospital_b_patients(
     for source in duplicate_sources:
         source_dt = _parse_timestamp(source.get("admitted_at"))
         if source_dt is None:
-            source_dt = faker.date_time_between(start_date="-30d", end_date="now", tzinfo=timezone.utc)
+            source_dt = faker.date_time_between(
+                start_date=ICU_SEED_REFERENCE_TIME - timedelta(days=30),
+                end_date=ICU_SEED_REFERENCE_TIME,
+                tzinfo=timezone.utc,
+            )
 
         jitter_seconds = rng.randint(-120, 120)
         b_dt = source_dt + timedelta(seconds=jitter_seconds)
@@ -149,7 +159,7 @@ def seed_hospital_b_patients(
         mapped_codes = unit_to_ward_codes.get(str(source.get("icu_unit")), ["MICU"])
         rows.append(
             {
-                "pid": str(uuid.uuid4()),
+                "pid": faker.uuid4(),
                 "ward_code": rng.choice(mapped_codes),
                 "room": str(source.get("bed_number", "Bed 1")),
                 "admission_ts": int(b_dt.timestamp() * 1000),
@@ -158,10 +168,14 @@ def seed_hospital_b_patients(
 
     ward_codes = [row["ward_code"] for row in HOSPITAL_B_WARD_CODE_MAP_TABLE]
     for _ in range(unique_count):
-        b_dt = faker.date_time_between(start_date="-45d", end_date="now", tzinfo=timezone.utc)
+        b_dt = faker.date_time_between(
+            start_date=ICU_SEED_REFERENCE_TIME - timedelta(days=45),
+            end_date=ICU_SEED_REFERENCE_TIME,
+            tzinfo=timezone.utc,
+        )
         rows.append(
             {
-                "pid": str(uuid.uuid4()),
+                "pid": faker.uuid4(),
                 "ward_code": rng.choice(ward_codes),
                 "room": f"Bed {rng.randint(1, 60)}",
                 "admission_ts": int(b_dt.timestamp() * 1000),

@@ -70,22 +70,32 @@ class RewardModel(BaseModel):
 
     data_clean_score: float = Field(
         ...,
+        ge=0.0,
+        le=1.0,
         description="Reward contribution for correctness of data cleaning output.",
     )
     query_correct_score: float = Field(
         ...,
+        ge=0.0,
+        le=1.0,
         description="Reward contribution for SQL correctness against expected logic/results.",
     )
     efficiency_bonus: float = Field(
         ...,
+        ge=0.0,
+        le=1.0,
         description="Positive reward bonus for solving with fewer steps or lower cost.",
     )
     step_penalty: float = Field(
         ...,
+        ge=-1.0,
+        le=0.0,
         description="Negative per-step penalty to encourage concise solutions.",
     )
     total: float = Field(
         ...,
+        ge=0.0,
+        le=1.0,
         description="Total reward for the step after combining all reward components.",
     )
 
@@ -256,7 +266,7 @@ REWARD_MODEL_EXAMPLE = RewardModel(
     query_correct_score=0.8,
     efficiency_bonus=0.1,
     step_penalty=-0.05,
-    total=1.55,
+    total=0.75,
 )
 
 STATE_MODEL_EXAMPLE = StateModel(

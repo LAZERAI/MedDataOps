@@ -196,7 +196,8 @@ class RewardCalculator:
         Penalizing trial-and-error action spam encourages deliberate, auditable decisions,
         which is safer for data quality pipelines in regulated clinical environments.
         """
-        return -self.step_penalty_per_action * max(0, unnecessary_actions)
+        penalty = -self.step_penalty_per_action * max(0, unnecessary_actions)
+        return max(-1.0, min(0.0, penalty))
 
     def combined_episode_reward(self, clean_score: float, query_score: float, efficiency_bonus: float) -> float:
         """Compute weighted reward before step penalties.
@@ -256,7 +257,7 @@ class RewardCalculator:
         step_penalty = self.step_penalty(unnecessary_actions)
 
         weighted_reward = self.combined_episode_reward(clean_score, query_score, efficiency_bonus)
-        total_reward = weighted_reward + step_penalty
+        total_reward = self._clamp_01(weighted_reward + step_penalty)
 
         return RewardModel(
             data_clean_score=clean_score,

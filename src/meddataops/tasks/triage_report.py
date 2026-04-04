@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+from datetime import date, timedelta
 from typing import Any
 
 import pandas as pd
@@ -33,6 +34,9 @@ WARD_VARIANTS: dict[str, list[str]] = {
     "MEDSURG": ["MEDSURG", "medsurg", "Medsurg"],
     "OBS": ["OBS", "obs", "Obs"],
 }
+
+
+TRIAGE_REFERENCE_DATE = date(2026, 4, 4)
 
 
 def seed_triage_report_dataset(
@@ -72,7 +76,10 @@ def seed_triage_report_dataset(
         else:
             age_value = rng.randint(18, 95)
 
-        admission_dt = faker.date_between(start_date="-2y", end_date="today")
+        admission_dt = faker.date_between(
+            start_date=TRIAGE_REFERENCE_DATE - timedelta(days=730),
+            end_date=TRIAGE_REFERENCE_DATE,
+        )
 
         record = {
             "patient_id": f"P{100000 + index}",
@@ -102,7 +109,12 @@ def _normalize_agent_table(agent_table: pd.DataFrame | list[dict[str, Any]]) -> 
     df = df.copy()
     df["patient_id"] = df.get("patient_id", pd.Series(dtype="string")).astype("string").str.strip()
 
-    parsed_dates = pd.to_datetime(df.get("admission_date"), errors="coerce", dayfirst=True)
+    raw_dates = df.get("admission_date")
+    parsed_dates = pd.to_datetime(raw_dates, errors="coerce", format="%Y-%m-%d")
+    if parsed_dates.isna().any():
+        fallback_mask = parsed_dates.isna()
+        fallback_values = pd.to_datetime(pd.Series(raw_dates)[fallback_mask], errors="coerce", dayfirst=True)
+        parsed_dates.loc[fallback_mask] = fallback_values
     df["admission_date"] = parsed_dates.dt.strftime("%Y-%m-%d")
     df.loc[parsed_dates.isna(), "admission_date"] = None
 
@@ -161,6 +173,14 @@ def _row_sig(row: dict[str, Any], columns: list[str]) -> tuple[Any, ...]:
     return tuple(signature)
 
 
+def _records_match(left: list[dict[str, Any]], right: list[dict[str, Any]], columns: list[str]) -> bool:
+    if len(left) != len(right):
+        return False
+    left_sig = sorted(_row_sig(row, columns) for row in left)
+    right_sig = sorted(_row_sig(row, columns) for row in right)
+    return left_sig == right_sig
+
+
 def score_triage_report(
     agent_table: pd.DataFrame | list[dict[str, Any]],
     agent_query_result: pd.DataFrame | list[dict[str, Any]],
@@ -204,6 +224,22 @@ def score_triage_report(
         query_df = agent_query_result.copy()
     else:
         query_df = pd.DataFrame(agent_query_result)
+
+    # Fast-path guarantee: exact ground truth clean rows + exact expected query result must score 1.0.
+    gt_clean_records = _TRIAGE_GROUND_TRUTH_DF.to_dict(orient="records")
+    candidate_clean_records = cleaned_agent_df.to_dict(orient="records")
+    if _records_match(candidate_clean_records, gt_clean_records, required_columns):
+        if not query_df.empty and {"ward", "patient_count"}.issubset(set(query_df.columns)):
+            exact_query = query_df[["ward", "patient_count"]].copy()
+            exact_query["ward"] = exact_query["ward"].astype("string").str.strip().str.upper()
+            exact_query["patient_count"] = pd.to_numeric(exact_query["patient_count"], errors="coerce").fillna(0).astype(int)
+            actual_map = {
+                str(row["ward"]).upper(): int(row["patient_count"])
+                for row in exact_query.to_dict(orient="records")
+            }
+            expected_map = {row["ward"]: int(row["patient_count"]) for row in _TRIAGE_EXPECTED_QUERY_RESULT}
+            if actual_map == expected_map:
+                return 1.0
 
     expected_df = pd.DataFrame(_TRIAGE_EXPECTED_QUERY_RESULT)
     if expected_df.empty and query_df.empty:
