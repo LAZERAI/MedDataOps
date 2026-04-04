@@ -175,6 +175,15 @@ $env:HF_TOKEN = "<your_hf_token>"
 python inference.py
 ```
 
+If you are on a low-TPM provider tier and see repeated `429` responses, you can tune retries and prompt/output budgets:
+
+```powershell
+$env:MAX_API_RETRIES = "8"
+$env:ACTION_TOKEN_BUDGET = "600"
+$env:MODEL_MAX_OUTPUT_TOKENS = "180"
+python inference.py
+```
+
 ### Quick smoke test
 
 ```bash
@@ -313,12 +322,13 @@ Measured baseline from `inference.py`:
 
 | task | model | score | steps | status |
 |---|---|---:|---:|---|
-| triage_report | meta-llama/Llama-3.1-8B-Instruct | 0.6000 | 20 | ok |
-| medication_summary | meta-llama/Llama-3.1-8B-Instruct | 0.0000 | 7 | llm_failed |
-| icu_capacity | meta-llama/Llama-3.1-8B-Instruct | 0.0000 | 0 | llm_failed |
+| triage_report | llama-3.1-8b-instant | 0.6000 | 20 | ok |
+| medication_summary | llama-3.1-8b-instant | 0.0000 | 20 | ok |
+| icu_capacity | llama-3.1-8b-instant | 0.0000 | 3 | ok |
 
-Scores measured on 2026-04-04 against lazerai-meddataops.hf.space using meta-llama/Llama-3.1-8B-Instruct via HF Inference Router.
-Run note: Hugging Face Inference Providers returned HTTP 402 mid-run (depleted monthly credits), causing `llm_failed` statuses on later tasks.
+Scores measured on 2026-04-04 against lazerai-meddataops.hf.space using `https://api.groq.com/openai/v1` with `llama-3.1-8b-instant`.
+
+Run note: this benchmark completed without `llm_failed` status. Free-tier TPM limits can still introduce multiple `429` retries and increase runtime.
 
 ## 10. Project Structure
 

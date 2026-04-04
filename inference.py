@@ -24,11 +24,14 @@ if str(SRC_DIR) not in sys.path:
 
 TOTAL_RUNTIME_BUDGET_SECONDS = 19 * 60
 REQUEST_TIMEOUT_SECONDS = 45
-MAX_API_RETRIES = 4
+MAX_API_RETRIES = int(os.getenv("MAX_API_RETRIES", "4"))
 MAX_STEPS_PER_TASK = int(os.getenv("MAX_STEPS_PER_TASK", "20"))
 GLOBAL_RANDOM_SEED = int(os.getenv("GLOBAL_RANDOM_SEED", "42"))
 MODEL_TEMPERATURE = float(os.getenv("MODEL_TEMPERATURE", "0.0"))
 MODEL_TOP_P = float(os.getenv("MODEL_TOP_P", "1.0"))
+
+_max_output_tokens_raw = os.getenv("MODEL_MAX_OUTPUT_TOKENS", "").strip()
+MODEL_MAX_OUTPUT_TOKENS = int(_max_output_tokens_raw) if _max_output_tokens_raw else None
 
 TASK_RUN_ORDER = [
     {"id": "triage_report", "aliases": ["easy"], "seed": 101},
@@ -45,7 +48,7 @@ LEGACY_ACTION_MAP = {
     "submit": "submit",
 }
 
-ACTION_TOKEN_BUDGET = 2000
+ACTION_TOKEN_BUDGET = int(os.getenv("ACTION_TOKEN_BUDGET", "2000"))
 APPROX_CHARS_PER_TOKEN = 4
 ACTION_MESSAGE_CHAR_BUDGET = ACTION_TOKEN_BUDGET * APPROX_CHARS_PER_TOKEN
 
@@ -560,6 +563,22 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _extract_retry_after_seconds(error: Exception) -> float | None:
+    text = str(error)
+    patterns = [
+        r"Please try again in\s*([0-9]+(?:\.[0-9]+)?)s",
+        r"try again in\s*([0-9]+(?:\.[0-9]+)?)\s*seconds",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            try:
+                return float(match.group(1))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 class EnvBridge:
     def __init__(self, seed: int) -> None:
         env_module = importlib.import_module("meddataops.env")
@@ -702,13 +721,17 @@ def _call_llm_with_retry(
             timeout_seconds = min(timeout_seconds, max(2.0, remaining - 1.0))
 
         try:
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                temperature=MODEL_TEMPERATURE,
-                top_p=MODEL_TOP_P,
-                timeout=timeout_seconds,
-            )
+            request_kwargs: dict[str, Any] = {
+                "model": model_name,
+                "messages": messages,
+                "temperature": MODEL_TEMPERATURE,
+                "top_p": MODEL_TOP_P,
+                "timeout": timeout_seconds,
+            }
+            if MODEL_MAX_OUTPUT_TOKENS is not None and MODEL_MAX_OUTPUT_TOKENS > 0:
+                request_kwargs["max_tokens"] = MODEL_MAX_OUTPUT_TOKENS
+
+            response = client.chat.completions.create(**request_kwargs)
             return response.choices[0].message.content or "{}"
         except (APITimeoutError, APIConnectionError, RateLimitError, APIError) as exc:
             last_error = exc
@@ -721,6 +744,11 @@ def _call_llm_with_retry(
                     break
 
             sleep_seconds = min(8.0, (2 ** (attempt - 1)) + rng.uniform(0.1, 0.7))
+
+            retry_after = _extract_retry_after_seconds(exc)
+            if retry_after is not None:
+                sleep_seconds = max(sleep_seconds, min(30.0, retry_after + rng.uniform(0.2, 0.8)))
+
             if deadline is not None:
                 sleep_seconds = min(sleep_seconds, max(0.0, deadline - time.monotonic() - 1.0))
             if sleep_seconds <= 0.0:

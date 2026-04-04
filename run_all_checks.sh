@@ -29,6 +29,40 @@ have_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
+resolve_python_cmd() {
+  if [[ -n "${PYTHON_CMD:-}" ]]; then
+    echo "$PYTHON_CMD"
+    return
+  fi
+
+  if [[ -x "$ROOT_DIR/.venv/Scripts/python.exe" ]]; then
+    echo "$ROOT_DIR/.venv/Scripts/python.exe"
+    return
+  fi
+
+  if have_cmd python3; then
+    echo "python3"
+    return
+  fi
+
+  if have_cmd python; then
+    echo "python"
+    return
+  fi
+
+  echo ""
+}
+
+PYTHON_CMD="$(resolve_python_cmd)"
+
+have_python() {
+  [[ -n "$PYTHON_CMD" ]]
+}
+
+py_exec() {
+  "$PYTHON_CMD" "$@"
+}
+
 set_result() {
   local idx="$1"
   local status="$2"
@@ -67,22 +101,27 @@ check_2_openenv_validate() {
   local log="$ARTIFACT_DIR/openenv_validate.log"
 
   if have_cmd openenv; then
-    if openenv validate openenv.yaml >"$log" 2>&1; then
-      set_result 2 "PASSED" "2) openenv validate passed"
+    if openenv validate . >"$log" 2>&1; then
+      set_result 2 "PASSED" "2) openenv validate . passed"
+    elif openenv validate openenv.yaml >"$log" 2>&1; then
+      # Backward compatibility for older OpenEnv CLIs.
+      set_result 2 "PASSED" "2) openenv validate openenv.yaml passed"
     else
       set_result 2 "FAILED" "2) openenv validate failed (see $log)"
     fi
     return
   fi
 
-  if have_cmd python && python - <<'PY' >/dev/null 2>&1
+  if have_python && py_exec - <<'PY' >/dev/null 2>&1
 import importlib.util
 import sys
 sys.exit(0 if importlib.util.find_spec('openenv') else 1)
 PY
   then
-    if python -m openenv validate openenv.yaml >"$log" 2>&1; then
-      set_result 2 "PASSED" "2) python -m openenv validate passed"
+    if py_exec -m openenv validate . >"$log" 2>&1; then
+      set_result 2 "PASSED" "2) python -m openenv validate . passed"
+    elif py_exec -m openenv validate openenv.yaml >"$log" 2>&1; then
+      set_result 2 "PASSED" "2) python -m openenv validate openenv.yaml passed"
     else
       set_result 2 "FAILED" "2) python -m openenv validate failed (see $log)"
     fi
@@ -151,7 +190,7 @@ check_4_docker_run_health() {
 }
 
 check_9_memory_under_8gb() {
-  if ! have_cmd docker || ! have_cmd python; then
+  if ! have_cmd docker || ! have_python; then
     set_result 9 "FAILED" "9) docker/python missing; cannot check memory"
     return
   fi
@@ -165,7 +204,7 @@ check_9_memory_under_8gb() {
   mem_usage="$(docker stats --no-stream --format "{{.MemUsage}}" "$CONTAINER_NAME" 2>/dev/null | head -n 1)"
   raw_used="$(echo "$mem_usage" | awk -F'/' '{print $1}' | xargs)"
 
-  mem_bytes="$(python - "$raw_used" <<'PY'
+  mem_bytes="$(py_exec - "$raw_used" <<'PY'
 import re, sys
 
 s = (sys.argv[1] if len(sys.argv) > 1 else '').strip()
@@ -208,7 +247,7 @@ PY
 }
 
 check_5_6_8_inference() {
-  if ! have_cmd python; then
+  if ! have_python; then
     set_result 5 "FAILED" "5) python not found; cannot run inference"
     set_result 6 "FAILED" "6) skipped because inference did not run"
     set_result 8 "FAILED" "8) skipped because inference did not run"
@@ -232,7 +271,7 @@ check_5_6_8_inference() {
   local start end elapsed
 
   start="$(date +%s)"
-  if python inference.py >"$log" 2>&1; then
+  if py_exec inference.py >"$log" 2>&1; then
     INFERENCE_OK=1
     set_result 5 "PASSED" "5) inference.py completed without errors"
   else
@@ -250,7 +289,7 @@ check_5_6_8_inference() {
     set_result 8 "FAILED" "8) inference runtime ${elapsed}s (>= ${INFERENCE_MAX_SECONDS}s)"
   fi
 
-  if python - "$log" "$score_log" <<'PY'
+  if py_exec - "$log" "$score_log" <<'PY'
 import json
 import re
 import sys
@@ -280,14 +319,14 @@ PY
 }
 
 check_7_ground_truth_scores() {
-  if ! have_cmd python; then
+  if ! have_python; then
     set_result 7 "FAILED" "7) python not found; cannot run ground-truth score check"
     return
   fi
 
   local log="$ARTIFACT_DIR/ground_truth_scores.json"
 
-  if python - "$log" <<'PY'
+  if py_exec - "$log" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -311,7 +350,11 @@ med_task = get_task('medication_summary')
 med_score = float(ms.score_medication_summary(med_task.expected_clean_rows, ms.MEDICATION_SUMMARY_GROUND_TRUTH_EXPECTED_RESULT))
 
 icu_task = get_task('icu_capacity')
-icu_score = float(ic.score_icu_capacity(icu_task.expected_clean_rows, ic.ICU_CAPACITY_GROUND_TRUTH_EXPECTED_RESULT))
+icu_score = float(ic.score_icu_capacity(
+  icu_task.expected_clean_rows,
+  ic.ICU_CAPACITY_GROUND_TRUTH_EXPECTED_RESULT,
+  agent_query=icu_task.expected_sql,
+))
 
 scores = {
     'triage_report': triage_score,
@@ -332,14 +375,14 @@ PY
 }
 
 check_10_readme_sections() {
-  if ! have_cmd python; then
+  if ! have_python; then
     set_result 10 "FAILED" "10) python not found; cannot validate README sections"
     return
   fi
 
   local log="$ARTIFACT_DIR/readme_sections.json"
 
-  if python - "$log" <<'PY'
+  if py_exec - "$log" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -371,14 +414,14 @@ PY
 }
 
 check_11_openenv_yaml_fields() {
-  if ! have_cmd python; then
+  if ! have_python; then
     set_result 11 "FAILED" "11) python not found; cannot validate openenv.yaml"
     return
   fi
 
   local log="$ARTIFACT_DIR/openenv_fields.json"
 
-  if python - "$log" <<'PY'
+  if py_exec - "$log" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -427,14 +470,14 @@ PY
 }
 
 check_12_pydantic_typed() {
-  if ! have_cmd python; then
+  if ! have_python; then
     set_result 12 "FAILED" "12) python not found; cannot validate Pydantic typing"
     return
   fi
 
   local log="$ARTIFACT_DIR/pydantic_typed.json"
 
-  if python - "$log" <<'PY'
+  if py_exec - "$log" <<'PY'
 import ast
 import json
 import sys
@@ -452,6 +495,8 @@ def is_basemodel_base(base):
         return base.attr == 'BaseModel'
     return False
 
+ALLOWED_UNANNOTATED_CLASS_FIELDS = {'model_config'}
+
 for file in py_files:
     try:
         tree = ast.parse(file.read_text(encoding='utf-8'))
@@ -466,7 +511,9 @@ for file in py_files:
             if isinstance(stmt, ast.Assign):
                 field_names = [t.id for t in stmt.targets if isinstance(t, ast.Name)]
                 if field_names:
-                    violations.append(f"{file}:{node.name}:{','.join(field_names)}")
+                    disallowed = [name for name in field_names if name not in ALLOWED_UNANNOTATED_CLASS_FIELDS]
+                    if disallowed:
+                        violations.append(f"{file}:{node.name}:{','.join(disallowed)}")
 
 payload = {'violations': violations, 'parse_errors': parse_errors}
 Path(sys.argv[1]).write_text(json.dumps(payload, indent=2), encoding='utf-8')

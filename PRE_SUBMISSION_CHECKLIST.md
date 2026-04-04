@@ -38,7 +38,7 @@ curl -sS -o /tmp/hf_reset_body.json -w "%{http_code}\n" \
 - Exact command:
 
 ```bash
-openenv validate openenv.yaml
+openenv validate .
 ```
 
 - Passing result:
@@ -96,7 +96,7 @@ docker rm -f meddataops_presub
 - Exact command:
 
 ```bash
-API_BASE_URL="https://api-inference.huggingface.co/v1" \
+API_BASE_URL="https://router.huggingface.co/v1" \
 MODEL_NAME="meta-llama/Llama-3.1-8B-Instruct" \
 HF_TOKEN="<your_hf_token>" \
 python inference.py
@@ -116,7 +116,7 @@ python inference.py
 - Exact command:
 
 ```bash
-API_BASE_URL="https://api-inference.huggingface.co/v1" MODEL_NAME="meta-llama/Llama-3.1-8B-Instruct" HF_TOKEN="<your_hf_token>" \
+API_BASE_URL="https://router.huggingface.co/v1" MODEL_NAME="meta-llama/Llama-3.1-8B-Instruct" HF_TOKEN="<your_hf_token>" \
 python inference.py | tee /tmp/inference.log
 python - <<'PY'
 import re, sys
@@ -170,7 +170,11 @@ med_task = get_task('medication_summary')
 med_score = ms.score_medication_summary(med_task.expected_clean_rows, ms.MEDICATION_SUMMARY_GROUND_TRUTH_EXPECTED_RESULT)
 
 icu_task = get_task('icu_capacity')
-icu_score = ic.score_icu_capacity(icu_task.expected_clean_rows, ic.ICU_CAPACITY_GROUND_TRUTH_EXPECTED_RESULT)
+icu_score = ic.score_icu_capacity(
+  icu_task.expected_clean_rows,
+  ic.ICU_CAPACITY_GROUND_TRUTH_EXPECTED_RESULT,
+  agent_query=icu_task.expected_sql,
+)
 
 scores = {
     'triage_report': float(triage_score),
@@ -197,7 +201,7 @@ PY
 - Exact command:
 
 ```bash
-time API_BASE_URL="https://api-inference.huggingface.co/v1" MODEL_NAME="meta-llama/Llama-3.1-8B-Instruct" HF_TOKEN="<your_hf_token>" python inference.py
+time API_BASE_URL="https://router.huggingface.co/v1" MODEL_NAME="meta-llama/Llama-3.1-8B-Instruct" HF_TOKEN="<your_hf_token>" python inference.py
 ```
 
 - Passing result:
