@@ -8,6 +8,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -139,6 +140,65 @@ class TaskRunResult:
 class ParsedAction(BaseModel):
     action_type: str = Field(default="noop")
     parameters: dict[str, Any] = Field(default_factory=dict)
+
+
+def _utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _safe_token(value: Any) -> str:
+    text = str(value)
+    text = text.replace("\n", " ").replace("\r", " ").strip()
+    text = re.sub(r"\s+", "_", text)
+    return text if text else "na"
+
+
+def _emit_start(*, run_id: str, model_name: str, task_ids: list[str], max_steps_per_task: int) -> None:
+    print(
+        "[START]"
+        f" run_id={_safe_token(run_id)}"
+        f" ts_utc={_safe_token(_utc_timestamp())}"
+        f" model={_safe_token(model_name)}"
+        f" tasks={_safe_token(','.join(task_ids))}"
+        f" max_steps_per_task={max_steps_per_task}"
+    )
+
+
+def _emit_step(
+    *,
+    run_id: str,
+    task_id: str,
+    step: int,
+    action_type: str,
+    reward: float,
+    done: bool,
+    status: str,
+) -> None:
+    print(
+        "[STEP]"
+        f" run_id={_safe_token(run_id)}"
+        f" task_id={_safe_token(task_id)}"
+        f" step={step}"
+        f" action_type={_safe_token(action_type)}"
+        f" reward={reward:.6f}"
+        f" done={'true' if done else 'false'}"
+        f" status={_safe_token(status)}"
+    )
+
+
+def _emit_end(*, run_id: str, results: list[TaskRunResult], total_elapsed: float) -> None:
+    task_count = len(results)
+    mean_score = sum(result.final_score for result in results) / max(1, task_count)
+    status_blob = ",".join(f"{result.task_id}:{result.status}" for result in results)
+    print(
+        "[END]"
+        f" run_id={_safe_token(run_id)}"
+        f" ts_utc={_safe_token(_utc_timestamp())}"
+        f" task_count={task_count}"
+        f" mean_score={mean_score:.6f}"
+        f" total_elapsed_s={total_elapsed:.3f}"
+        f" statuses={_safe_token(status_blob)}"
+    )
 
 
 def _require_env(name: str) -> str:
@@ -285,7 +345,10 @@ def _normalize_observation(raw_observation: Any, task_id: str, step_number: int)
 
 def _warn_parse_fallback(content: str) -> None:
     snippet = _truncate_string((content or "").replace("\n", " "), max_len=240)
-    print(f"[warn] Unable to parse LLM action. Falling back to noop. content_snippet={snippet}")
+    print(
+        f"[warn] Unable to parse LLM action. Falling back to noop. content_snippet={snippet}",
+        file=sys.stderr,
+    )
 
 
 def _coerce_action_type(raw_value: Any) -> str:
@@ -662,7 +725,10 @@ def _call_llm_with_retry(
                 sleep_seconds = min(sleep_seconds, max(0.0, deadline - time.monotonic() - 1.0))
             if sleep_seconds <= 0.0:
                 break
-            print(f"[retry] OpenAI call failed (attempt {attempt}/{MAX_API_RETRIES}): {exc}. Sleeping {sleep_seconds:.1f}s.")
+            print(
+                f"[retry] OpenAI call failed (attempt {attempt}/{MAX_API_RETRIES}): {exc}. Sleeping {sleep_seconds:.1f}s.",
+                file=sys.stderr,
+            )
             time.sleep(sleep_seconds)
 
     raise RuntimeError(f"OpenAI call failed after {MAX_API_RETRIES} attempts: {last_error}")
@@ -816,8 +882,8 @@ def _extract_final_score(observation: dict[str, Any], last_reward: float, info: 
 
 
 def _print_summary(results: list[TaskRunResult], total_elapsed: float) -> None:
-    print("\n=== MedDataOps Inference Summary ===")
-    print(f"Total elapsed: {total_elapsed:.1f}s")
+    print("\n=== MedDataOps Inference Summary ===", file=sys.stderr)
+    print(f"Total elapsed: {total_elapsed:.1f}s", file=sys.stderr)
 
     headers = ["task", "steps", "final_score", "status", "elapsed_s"]
     rows = [
@@ -837,10 +903,10 @@ def _print_summary(results: list[TaskRunResult], total_elapsed: float) -> None:
     def fmt_row(row: list[str]) -> str:
         return " | ".join(cell.ljust(widths[idx]) for idx, cell in enumerate(row))
 
-    print(fmt_row(headers))
-    print("-+-".join("-" * w for w in widths))
+    print(fmt_row(headers), file=sys.stderr)
+    print("-+-".join("-" * w for w in widths), file=sys.stderr)
     for row in rows:
-        print(fmt_row(row))
+        print(fmt_row(row), file=sys.stderr)
 
 
 def _resolve_task_candidates(task_entry: dict[str, Any]) -> list[str]:
@@ -855,6 +921,7 @@ def _resolve_task_candidates(task_entry: dict[str, Any]) -> list[str]:
 def main() -> None:
     start_time = time.monotonic()
     deadline = start_time + TOTAL_RUNTIME_BUDGET_SECONDS
+    run_id = f"meddataops-{int(start_time)}"
 
     api_base_url = _require_env("API_BASE_URL")
     model_name = _require_env("MODEL_NAME")
@@ -871,22 +938,37 @@ def main() -> None:
 
     env = EnvBridge(seed=GLOBAL_RANDOM_SEED)
     results: list[TaskRunResult] = []
+    _emit_start(
+        run_id=run_id,
+        model_name=model_name,
+        task_ids=[str(task["id"]) for task in TASK_RUN_ORDER],
+        max_steps_per_task=MAX_STEPS_PER_TASK,
+    )
 
     for task_entry in TASK_RUN_ORDER:
         if time.monotonic() >= deadline:
-            print("[stop] Global runtime budget reached before starting next task.")
+            print("[stop] Global runtime budget reached before starting next task.", file=sys.stderr)
             break
 
         task_candidates = _resolve_task_candidates(task_entry)
         task_seed = _safe_int(task_entry.get("seed"), 0)
         task_start = time.monotonic()
 
-        print(f"\n=== Running task {task_candidates[0]} (seed={task_seed}) ===")
+        print(f"\n=== Running task {task_candidates[0]} (seed={task_seed}) ===", file=sys.stderr)
 
         try:
             observation, resolved_task_id = env.reset_task(task_candidates, seed=task_seed)
         except Exception as exc:
-            print(f"[error] reset failed for task candidates {task_candidates}: {exc}")
+            print(f"[error] reset failed for task candidates {task_candidates}: {exc}", file=sys.stderr)
+            _emit_step(
+                run_id=run_id,
+                task_id=task_candidates[0],
+                step=0,
+                action_type="reset",
+                reward=0.0,
+                done=True,
+                status="reset_failed",
+            )
             results.append(
                 TaskRunResult(
                     task_id=task_candidates[0],
@@ -934,7 +1016,16 @@ def main() -> None:
                     deadline=deadline,
                 )
             except Exception as exc:
-                print(f"[error] LLM call failed on task {resolved_task_id}, step {step_idx}: {exc}")
+                print(f"[error] LLM call failed on task {resolved_task_id}, step {step_idx}: {exc}", file=sys.stderr)
+                _emit_step(
+                    run_id=run_id,
+                    task_id=resolved_task_id,
+                    step=step_idx,
+                    action_type="llm_call",
+                    reward=float(last_reward),
+                    done=False,
+                    status="llm_failed",
+                )
                 status = "llm_failed"
                 break
 
@@ -947,7 +1038,16 @@ def main() -> None:
                     step_index=step_idx,
                 )
             except Exception as exc:
-                print(f"[error] env.step failed on task {resolved_task_id}, step {step_idx}: {exc}")
+                print(f"[error] env.step failed on task {resolved_task_id}, step {step_idx}: {exc}", file=sys.stderr)
+                _emit_step(
+                    run_id=run_id,
+                    task_id=resolved_task_id,
+                    step=step_idx,
+                    action_type=action.action_type,
+                    reward=float(last_reward),
+                    done=False,
+                    status="step_failed",
+                )
                 status = "step_failed"
                 break
 
@@ -959,11 +1059,23 @@ def main() -> None:
                 "info": _compact_json_like(last_info, max_items=12, max_str_len=180),
             }
 
-            steps_taken = step_idx
-            print(
-                f"[{resolved_task_id}] step={step_idx:02d} action={action.action_type} "
-                f"reward={last_reward:.4f} done={done}"
+            step_status = "ok"
+            if isinstance(last_info, dict) and last_info.get("query_valid") is False:
+                step_status = "query_invalid"
+            if bool(done):
+                step_status = "done"
+
+            _emit_step(
+                run_id=run_id,
+                task_id=resolved_task_id,
+                step=step_idx,
+                action_type=action.action_type,
+                reward=float(last_reward),
+                done=bool(done),
+                status=step_status,
             )
+
+            steps_taken = step_idx
 
             if done:
                 break
@@ -979,6 +1091,15 @@ def main() -> None:
                 )
                 steps_taken += 1
                 status = "forced_submit" if done else "max_steps"
+                _emit_step(
+                    run_id=run_id,
+                    task_id=resolved_task_id,
+                    step=steps_taken,
+                    action_type="submit",
+                    reward=float(last_reward),
+                    done=bool(done),
+                    status=status,
+                )
             except Exception:
                 status = "max_steps"
 
@@ -999,6 +1120,7 @@ def main() -> None:
 
     total_elapsed = time.monotonic() - start_time
     _print_summary(results=results, total_elapsed=total_elapsed)
+    _emit_end(run_id=run_id, results=results, total_elapsed=total_elapsed)
 
 
 if __name__ == "__main__":

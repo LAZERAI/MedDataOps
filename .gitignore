@@ -34,3 +34,5 @@ Thumbs.db
 
 postgres_data/
 tmp/
+
+.playwright-mcp/

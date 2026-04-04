@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "meddataops"
+version = "1.0.0"
+description = "OpenEnv clinical data engineering environment for hospital DataOps tasks"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+license = { text = "MIT" }
+authors = [
+  { name = "MedDataOps Team" }
+]
+dependencies = [
+  "openenv-core>=0.2.0",
+  "fastapi>=0.111.0",
+  "uvicorn>=0.30.0",
+  "pydantic>=2.8.0",
+  "pandas>=2.2.0",
+  "psycopg2-binary>=2.9.9",
+  "openai>=1.54.0"
+]
+
+[project.scripts]
+server = "meddataops.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
