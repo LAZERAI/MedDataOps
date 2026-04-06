@@ -648,8 +648,8 @@ def tasks() -> TasksResponseModel:
 
 @app.post("/reset", response_model=ObservationResponseModel)
 def reset(
-    payload: ResetRequestModel,
     response: Response,
+    payload: ResetRequestModel | None = None,
     x_session_id: str | None = Header(default=None),
     session_id_header: str | None = Header(default=None, alias="session_id"),
     session_id_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
@@ -660,7 +660,14 @@ def reset(
         session_id_cookie=session_id_cookie,
     )
 
-    context = _ensure_session_context(session_id, seed=payload.seed)
+    if payload is None:
+        task_id = None
+        seed = None
+    else:
+        task_id = payload.task_id
+        seed = payload.seed
+
+    context = _ensure_session_context(session_id, seed=seed)
 
     try:
         if _db_manager is not None:
@@ -670,7 +677,7 @@ def reset(
                 pass
             context.working_tables = _db_manager.create_episode_working_tables(session_id=session_id, version="messy")
 
-        observation = context.adapter.reset(task_id=payload.task_id, seed=payload.seed)
+        observation = context.adapter.reset(task_id=task_id, seed=seed)
     except HTTPException:
         _drop_session_context(session_id)
         raise
