@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -35,6 +36,12 @@ class DataCleaningHandler:
         "fix_dtypes",
         "normalize_strings",
         "remove_outliers",
+        "rename_columns",
+        "map_values",
+        "coalesce_columns",
+        "copy_column",
+        "derive_column",
+        "fix_unix_ms",
     }
 
     def __init__(
@@ -181,6 +188,18 @@ class DataCleaningHandler:
             updated = self._op_fix_dtypes(dataframe, operation_payload)
         elif operation_name == "normalize_strings":
             updated = self._op_normalize_strings(dataframe, operation_payload)
+        elif operation_name == "rename_columns":
+            updated = self._op_rename_columns(dataframe, operation_payload)
+        elif operation_name == "map_values":
+            updated = self._op_map_values(dataframe, operation_payload)
+        elif operation_name == "coalesce_columns":
+            updated = self._op_coalesce_columns(dataframe, operation_payload)
+        elif operation_name == "copy_column":
+            updated = self._op_copy_column(dataframe, operation_payload)
+        elif operation_name == "derive_column":
+            updated = self._op_derive_column(dataframe, operation_payload)
+        elif operation_name == "fix_unix_ms":
+            updated = self._op_fix_unix_ms(dataframe, operation_payload)
         else:
             updated = self._op_remove_outliers(dataframe, operation_payload)
 
@@ -336,6 +355,243 @@ class DataCleaningHandler:
 
         mask = numeric.isna() | ((numeric >= lower) & (numeric <= upper))
         return updated.loc[mask].reset_index(drop=True)
+
+    def _op_rename_columns(self, dataframe: pd.DataFrame, payload: dict[str, Any]) -> pd.DataFrame:
+        mapping = payload.get("mapping")
+        if not isinstance(mapping, dict) or not mapping:
+            raise ValueError("rename_columns requires a non-empty 'mapping' object.")
+
+        updated = dataframe.copy()
+        for old_name, new_name in mapping.items():
+            if not isinstance(old_name, str) or not isinstance(new_name, str):
+                raise ValueError("rename_columns mapping must be of type {str: str}.")
+            if old_name == new_name:
+                continue
+            if old_name not in updated.columns:
+                continue
+
+            if new_name in updated.columns:
+                updated[new_name] = updated[new_name].combine_first(updated[old_name])
+                updated = updated.drop(columns=[old_name])
+            else:
+                updated = updated.rename(columns={old_name: new_name})
+
+        return updated
+
+    def _op_map_values(self, dataframe: pd.DataFrame, payload: dict[str, Any]) -> pd.DataFrame:
+        column = payload.get("column")
+        mapping = payload.get("mapping")
+        if not isinstance(column, str) or not isinstance(mapping, dict) or not mapping:
+            raise ValueError("map_values requires 'column' (str) and non-empty 'mapping' (object).")
+
+        self._validate_columns_exist(dataframe, [column])
+
+        has_default = "default" in payload
+        default_value = payload.get("default")
+
+        updated = dataframe.copy()
+
+        def _mapper(value: Any) -> Any:
+            if value in mapping:
+                return mapping[value]
+            key = str(value)
+            if key in mapping:
+                return mapping[key]
+            if has_default:
+                return default_value
+            return value
+
+        updated[column] = updated[column].map(_mapper)
+        return updated
+
+    def _op_coalesce_columns(self, dataframe: pd.DataFrame, payload: dict[str, Any]) -> pd.DataFrame:
+        target_column = payload.get("target_column") or payload.get("target")
+        source_columns = payload.get("source_columns") or payload.get("columns")
+
+        if not isinstance(target_column, str):
+            raise ValueError("coalesce_columns requires a string 'target_column'.")
+        if not isinstance(source_columns, list) or not source_columns or any(not isinstance(c, str) for c in source_columns):
+            raise ValueError("coalesce_columns requires 'source_columns' as a non-empty list of strings.")
+
+        self._validate_columns_exist(dataframe, source_columns)
+
+        updated = dataframe.copy()
+        series = pd.Series([None] * len(updated), dtype="object", index=updated.index)
+        for source_column in source_columns:
+            series = series.combine_first(updated[source_column])
+
+        if "fill_value" in payload:
+            series = series.fillna(payload.get("fill_value"))
+
+        updated[target_column] = series
+
+        if bool(payload.get("drop_sources", False)):
+            drop_list = [column for column in source_columns if column != target_column and column in updated.columns]
+            if drop_list:
+                updated = updated.drop(columns=drop_list)
+
+        return updated
+
+    def _op_copy_column(self, dataframe: pd.DataFrame, payload: dict[str, Any]) -> pd.DataFrame:
+        from_column = payload.get("from_column") or payload.get("source_column")
+        to_column = payload.get("to_column") or payload.get("target_column")
+
+        if not isinstance(from_column, str) or not isinstance(to_column, str):
+            raise ValueError("copy_column requires string fields 'from_column' and 'to_column'.")
+
+        self._validate_columns_exist(dataframe, [from_column])
+
+        overwrite = bool(payload.get("overwrite", True))
+        updated = dataframe.copy()
+
+        if overwrite or to_column not in updated.columns:
+            updated[to_column] = updated[from_column]
+        else:
+            updated[to_column] = updated[to_column].combine_first(updated[from_column])
+
+        return updated
+
+    def _op_derive_column(self, dataframe: pd.DataFrame, payload: dict[str, Any]) -> pd.DataFrame:
+        target_column = payload.get("target_column") or payload.get("column")
+        if not isinstance(target_column, str):
+            raise ValueError("derive_column requires a string 'target_column'.")
+
+        rule = str(payload.get("rule", "")).strip().lower()
+        updated = dataframe.copy()
+
+        if not rule and "value" in payload:
+            updated[target_column] = payload.get("value")
+            return updated
+
+        if rule == "from_column":
+            source_column = payload.get("source_column")
+            if not isinstance(source_column, str):
+                raise ValueError("derive_column rule 'from_column' requires 'source_column'.")
+            self._validate_columns_exist(updated, [source_column])
+            updated[target_column] = updated[source_column]
+            return updated
+
+        if rule == "if_equals":
+            source_column = payload.get("column")
+            if not isinstance(source_column, str):
+                raise ValueError("derive_column rule 'if_equals' requires 'column'.")
+            self._validate_columns_exist(updated, [source_column])
+
+            expected_value = payload.get("equals")
+            then_value = payload.get("then")
+            else_value = payload.get("else")
+            updated[target_column] = updated[source_column].map(
+                lambda value: then_value if value == expected_value else else_value
+            )
+            return updated
+
+        if rule == "template":
+            template = payload.get("template")
+            if not isinstance(template, str):
+                raise ValueError("derive_column rule 'template' requires a string 'template'.")
+
+            class _SafeDict(dict[str, Any]):
+                def __missing__(self, key: str) -> str:
+                    return ""
+
+            def _apply_template(row: pd.Series) -> str:
+                mapping = {
+                    key: "" if pd.isna(value) else value
+                    for key, value in row.to_dict().items()
+                }
+                try:
+                    return str(template.format_map(_SafeDict(mapping)))
+                except Exception:
+                    return template
+
+            updated[target_column] = updated.apply(_apply_template, axis=1)
+            return updated
+
+        if rule == "extract_digits":
+            source_column = payload.get("column")
+            if not isinstance(source_column, str):
+                raise ValueError("derive_column rule 'extract_digits' requires 'column'.")
+            self._validate_columns_exist(updated, [source_column])
+            fallback = str(payload.get("fallback", "UNKNOWN"))
+
+            updated[target_column] = (
+                updated[source_column]
+                .astype("string")
+                .str.extract(r"(\d+)", expand=False)
+                .fillna(fallback)
+            )
+            return updated
+
+        if rule == "date_within_days":
+            source_column = payload.get("column")
+            reference_date = payload.get("reference_date")
+            if not isinstance(source_column, str) or not isinstance(reference_date, str):
+                raise ValueError(
+                    "derive_column rule 'date_within_days' requires 'column' and 'reference_date'."
+                )
+            self._validate_columns_exist(updated, [source_column])
+
+            try:
+                days = int(payload.get("days", 0))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("derive_column rule 'date_within_days' requires integer 'days'.") from exc
+
+            ref_ts = pd.to_datetime(reference_date, errors="coerce", utc=True)
+            if pd.isna(ref_ts):
+                raise ValueError("derive_column rule 'date_within_days' has invalid 'reference_date'.")
+
+            then_value = payload.get("then")
+            else_value = payload.get("else")
+            cutoff = ref_ts - pd.Timedelta(days=days)
+
+            parsed = pd.to_datetime(updated[source_column], errors="coerce", utc=True)
+            mask = parsed.notna() & (parsed >= cutoff)
+            updated[target_column] = else_value
+            updated.loc[mask, target_column] = then_value
+            return updated
+
+        raise ValueError(
+            "Unsupported derive_column rule. Use one of: from_column, if_equals, template, extract_digits, date_within_days."
+        )
+
+    def _op_fix_unix_ms(self, dataframe: pd.DataFrame, payload: dict[str, Any]) -> pd.DataFrame:
+        columns = payload.get("columns")
+        if not isinstance(columns, list) or not columns:
+            single_column = payload.get("column")
+            columns = [single_column] if isinstance(single_column, str) else []
+
+        if not columns or any(not isinstance(c, str) for c in columns):
+            raise ValueError("fix_unix_ms requires 'column' or non-empty 'columns' list of strings.")
+
+        self._validate_columns_exist(dataframe, columns)
+        output = str(payload.get("output", "date")).strip().lower()
+
+        updated = dataframe.copy()
+
+        for column in columns:
+            converted = pd.to_datetime(updated[column], errors="coerce", utc=True)
+            numeric = pd.to_numeric(updated[column], errors="coerce")
+
+            numeric_mask = numeric.notna()
+            if numeric_mask.any():
+                as_seconds = numeric.copy()
+                millisecond_mask = numeric.abs() > 100_000_000_000
+                as_seconds.loc[millisecond_mask] = as_seconds.loc[millisecond_mask] / 1000.0
+                converted.loc[numeric_mask] = pd.to_datetime(
+                    as_seconds.loc[numeric_mask],
+                    unit="s",
+                    errors="coerce",
+                    utc=True,
+                )
+
+            if output == "datetime":
+                rendered = converted.dt.strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                rendered = converted.dt.strftime("%Y-%m-%d")
+
+            updated[column] = rendered.where(converted.notna(), None)
+
+        return updated
 
     def _ensure_reversible_copy(self, *, session_id: str, working_table: str) -> None:
         backup_table = self._backup_table_name(session_id, working_table)

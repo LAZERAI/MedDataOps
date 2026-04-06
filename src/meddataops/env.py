@@ -277,6 +277,29 @@ class MedDataOpsEnv:
     def _apply_operations(self, rows: list[dict[str, Any]], operations: list[dict[str, Any]]) -> list[dict[str, Any]]:
         updated = self._deep_rows(rows)
 
+        def _is_null_like(value: Any) -> bool:
+            if value in (None, "", "N/A", "n/a"):
+                return True
+            try:
+                return bool(pd.isna(value))
+            except Exception:
+                return False
+
+        def _render_template(template: str, row: dict[str, Any]) -> str:
+            safe_row = {
+                key: "" if _is_null_like(value) else value
+                for key, value in row.items()
+            }
+
+            class _SafeDict(dict[str, Any]):
+                def __missing__(self, key: str) -> str:
+                    return ""
+
+            try:
+                return str(template.format_map(_SafeDict(safe_row)))
+            except Exception:
+                return str(template)
+
         for operation in operations:
             if not isinstance(operation, dict):
                 continue
@@ -365,6 +388,216 @@ class MedDataOpsEnv:
                     signature = tuple(row.get(column) for column in columns)
                     deduped.setdefault(signature, row)
                 updated = list(deduped.values())
+
+            elif op == "rename_columns":
+                mapping = operation.get("mapping", {})
+                if not isinstance(mapping, dict):
+                    continue
+
+                for row in updated:
+                    for old_name, new_name in mapping.items():
+                        if not isinstance(old_name, str) or not isinstance(new_name, str):
+                            continue
+                        if old_name not in row:
+                            continue
+                        if old_name == new_name:
+                            continue
+
+                        old_value = row.get(old_name)
+                        current_value = row.get(new_name)
+                        if _is_null_like(current_value):
+                            row[new_name] = old_value
+                        elif new_name not in row:
+                            row[new_name] = old_value
+
+                        del row[old_name]
+
+            elif op == "map_values":
+                column = operation.get("column")
+                mapping = operation.get("mapping", {})
+                if not isinstance(column, str) or not isinstance(mapping, dict):
+                    continue
+
+                has_default = "default" in operation
+                default_value = operation.get("default")
+
+                for row in updated:
+                    if column not in row:
+                        continue
+
+                    value = row.get(column)
+                    mapped = None
+                    if value in mapping:
+                        mapped = mapping[value]
+                    elif str(value) in mapping:
+                        mapped = mapping[str(value)]
+
+                    if mapped is not None:
+                        row[column] = mapped
+                    elif has_default:
+                        row[column] = default_value
+
+            elif op == "coalesce_columns":
+                target_column = operation.get("target_column") or operation.get("target")
+                source_columns = operation.get("source_columns") or operation.get("columns")
+                if not isinstance(target_column, str) or not isinstance(source_columns, list) or not source_columns:
+                    continue
+
+                drop_sources = bool(operation.get("drop_sources", False))
+                fill_value = operation.get("fill_value")
+
+                for row in updated:
+                    chosen_value: Any = None
+                    for source_column in source_columns:
+                        if not isinstance(source_column, str):
+                            continue
+                        value = row.get(source_column)
+                        if not _is_null_like(value):
+                            chosen_value = value
+                            break
+
+                    if chosen_value is None and "fill_value" in operation:
+                        chosen_value = fill_value
+
+                    row[target_column] = chosen_value
+
+                    if drop_sources:
+                        for source_column in source_columns:
+                            if source_column != target_column:
+                                row.pop(source_column, None)
+
+            elif op == "copy_column":
+                from_column = operation.get("from_column") or operation.get("source_column")
+                to_column = operation.get("to_column") or operation.get("target_column")
+                if not isinstance(from_column, str) or not isinstance(to_column, str):
+                    continue
+
+                overwrite = bool(operation.get("overwrite", True))
+                for row in updated:
+                    if from_column not in row:
+                        continue
+
+                    if overwrite or to_column not in row or _is_null_like(row.get(to_column)):
+                        row[to_column] = row.get(from_column)
+
+            elif op == "derive_column":
+                target_column = operation.get("target_column") or operation.get("column")
+                if not isinstance(target_column, str):
+                    continue
+
+                rule = str(operation.get("rule", "")).strip().lower()
+
+                if not rule and "value" in operation:
+                    for row in updated:
+                        row[target_column] = operation.get("value")
+                    continue
+
+                if rule == "from_column":
+                    source_column = operation.get("source_column")
+                    if not isinstance(source_column, str):
+                        continue
+                    for row in updated:
+                        row[target_column] = row.get(source_column)
+
+                elif rule == "if_equals":
+                    source_column = operation.get("column")
+                    expected_value = operation.get("equals")
+                    then_value = operation.get("then")
+                    else_value = operation.get("else")
+                    if not isinstance(source_column, str):
+                        continue
+
+                    for row in updated:
+                        row[target_column] = then_value if row.get(source_column) == expected_value else else_value
+
+                elif rule == "template":
+                    template = operation.get("template")
+                    if not isinstance(template, str):
+                        continue
+                    for row in updated:
+                        row[target_column] = _render_template(template, row)
+
+                elif rule == "extract_digits":
+                    source_column = operation.get("column")
+                    fallback = str(operation.get("fallback", "UNKNOWN"))
+                    if not isinstance(source_column, str):
+                        continue
+
+                    for row in updated:
+                        raw_value = row.get(source_column)
+                        digits = "".join(ch for ch in str(raw_value or "") if ch.isdigit())
+                        row[target_column] = digits if digits else fallback
+
+                elif rule == "date_within_days":
+                    source_column = operation.get("column")
+                    reference_date = operation.get("reference_date")
+                    if not isinstance(source_column, str) or not isinstance(reference_date, str):
+                        continue
+
+                    try:
+                        days = int(operation.get("days", 0))
+                    except (TypeError, ValueError):
+                        days = 0
+
+                    then_value = operation.get("then")
+                    else_value = operation.get("else")
+
+                    ref_ts = pd.to_datetime(reference_date, errors="coerce", utc=True)
+                    if pd.isna(ref_ts):
+                        continue
+
+                    cutoff = ref_ts - pd.Timedelta(days=days)
+                    for row in updated:
+                        candidate_ts = pd.to_datetime(row.get(source_column), errors="coerce", utc=True)
+                        if not pd.isna(candidate_ts) and candidate_ts >= cutoff:
+                            row[target_column] = then_value
+                        else:
+                            row[target_column] = else_value
+
+            elif op == "fix_unix_ms":
+                columns = operation.get("columns")
+                if not isinstance(columns, list) or not columns:
+                    single_column = operation.get("column")
+                    columns = [single_column] if isinstance(single_column, str) else []
+
+                if not columns:
+                    continue
+
+                output = str(operation.get("output", "date")).strip().lower()
+
+                for row in updated:
+                    for column in columns:
+                        if not isinstance(column, str):
+                            continue
+
+                        raw_value = row.get(column)
+                        if _is_null_like(raw_value):
+                            continue
+
+                        parsed = pd.NaT
+                        try:
+                            if isinstance(raw_value, (int, float)):
+                                epoch_seconds = float(raw_value)
+                                if abs(epoch_seconds) > 100_000_000_000:
+                                    epoch_seconds = epoch_seconds / 1000.0
+                                parsed = pd.to_datetime(epoch_seconds, unit="s", errors="coerce", utc=True)
+                            elif isinstance(raw_value, str) and raw_value.strip().lstrip("-").isdigit():
+                                epoch_seconds = float(raw_value.strip())
+                                if abs(epoch_seconds) > 100_000_000_000:
+                                    epoch_seconds = epoch_seconds / 1000.0
+                                parsed = pd.to_datetime(epoch_seconds, unit="s", errors="coerce", utc=True)
+                            else:
+                                parsed = pd.to_datetime(raw_value, errors="coerce", utc=True)
+                        except Exception:
+                            parsed = pd.NaT
+
+                        if pd.isna(parsed):
+                            continue
+
+                        if output == "datetime":
+                            row[column] = parsed.strftime("%Y-%m-%d %H:%M:%S")
+                        else:
+                            row[column] = parsed.strftime("%Y-%m-%d")
 
         return updated
 

@@ -56,6 +56,17 @@ ICU_SQL = (
     "ORDER BY c.icu_unit"
 )
 
+ICU_WARD_CODE_MAP = {
+    "MICU": "ICU_MEDICAL",
+    "M-ICU": "ICU_MEDICAL",
+    "SICU": "ICU_SURGICAL",
+    "SURG-ICU": "ICU_SURGICAL",
+    "CCU": "ICU_CARDIAC",
+    "CARD-ICU": "ICU_CARDIAC",
+    "NCCU": "ICU_NEURO",
+    "NEURO-ICU": "ICU_NEURO",
+}
+
 
 @dataclass(frozen=True)
 class DeterministicTask:
@@ -110,6 +121,95 @@ TASKS: tuple[DeterministicTask, ...] = (
     DeterministicTask(
         task_id="icu_capacity",
         actions=(
+            {
+                "action_type": "clean_data",
+                "parameters": {
+                    "operations": [
+                        {
+                            "operation": "rename_columns",
+                            "mapping": {
+                                "patient_id": "source_record_id",
+                                "pid": "source_record_id",
+                                "bed_number": "raw_bed",
+                                "room": "raw_bed",
+                                "admitted_at": "raw_admitted_at",
+                                "admission_ts": "raw_admitted_at",
+                            },
+                        },
+                        {
+                            "operation": "map_values",
+                            "column": "ward_code",
+                            "mapping": ICU_WARD_CODE_MAP,
+                        },
+                        {
+                            "operation": "coalesce_columns",
+                            "target_column": "icu_unit",
+                            "source_columns": ["icu_unit", "ward_code"],
+                        },
+                        {
+                            "operation": "fix_unix_ms",
+                            "column": "raw_admitted_at",
+                            "output": "datetime",
+                        },
+                        {
+                            "operation": "copy_column",
+                            "from_column": "raw_admitted_at",
+                            "to_column": "admitted_at",
+                        },
+                        {
+                            "operation": "derive_column",
+                            "target_column": "source_system",
+                            "rule": "if_equals",
+                            "column": "source_table",
+                            "equals": "hospital_a_patients",
+                            "then": "hospital_a",
+                            "else": "hospital_b",
+                        },
+                        {
+                            "operation": "derive_column",
+                            "target_column": "source_prefix",
+                            "rule": "if_equals",
+                            "column": "source_system",
+                            "equals": "hospital_a",
+                            "then": "A",
+                            "else": "B",
+                        },
+                        {
+                            "operation": "derive_column",
+                            "target_column": "patient_uid",
+                            "rule": "template",
+                            "template": "{source_prefix}-{source_record_id}",
+                        },
+                        {
+                            "operation": "derive_column",
+                            "target_column": "bed_digits",
+                            "rule": "extract_digits",
+                            "column": "raw_bed",
+                            "fallback": "UNKNOWN",
+                        },
+                        {
+                            "operation": "derive_column",
+                            "target_column": "bed_number",
+                            "rule": "template",
+                            "template": "{source_prefix}-BED-{bed_digits}",
+                        },
+                        {
+                            "operation": "derive_column",
+                            "target_column": "status",
+                            "rule": "date_within_days",
+                            "column": "admitted_at",
+                            "reference_date": "2026-04-04",
+                            "days": 7,
+                            "then": "active",
+                            "else": "inactive",
+                        },
+                        {
+                            "operation": "remove_duplicates",
+                            "columns": ["icu_unit", "bed_number", "admitted_at"],
+                        },
+                    ]
+                },
+            },
             {"action_type": "fix_query", "parameters": {"query": ICU_SQL}},
             {"action_type": "submit", "parameters": {}},
         ),
@@ -160,7 +260,7 @@ def extract_score(reward_payload: Any) -> float:
     raise ValueError(f"Unable to extract score from reward payload: {reward_payload!r}")
 
 
-def run_task(base_url: str, task: DeterministicTask) -> TaskRunResult:
+def run_task_http(base_url: str, task: DeterministicTask) -> TaskRunResult:
     cookie_jar = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
 
@@ -201,6 +301,30 @@ def run_task(base_url: str, task: DeterministicTask) -> TaskRunResult:
         return TaskRunResult(task_id=task.task_id, score=0.0, steps=0, status="error", error=str(exc))
 
 
+def run_task_local(task: DeterministicTask) -> TaskRunResult:
+    try:
+        from meddataops.env import MedDataOpsEnv
+
+        env = MedDataOpsEnv()
+        env.reset(task_id=task.task_id)
+
+        final_step = None
+        for action in task.actions:
+            final_step = env.step(action)
+
+        if final_step is None:
+            return TaskRunResult(task_id=task.task_id, score=0.0, steps=0, status="error", error="No steps executed")
+
+        return TaskRunResult(
+            task_id=task.task_id,
+            score=float(final_step.reward),
+            steps=int(final_step.observation.step_index),
+            status="ok" if final_step.done else "not_done",
+        )
+    except Exception as exc:
+        return TaskRunResult(task_id=task.task_id, score=0.0, steps=0, status="error", error=str(exc))
+
+
 def render_markdown(results: list[TaskRunResult]) -> str:
     lines = [
         "| task | solver | score | steps | status |",
@@ -213,17 +337,22 @@ def render_markdown(results: list[TaskRunResult]) -> str:
     return "\n".join(lines)
 
 
-def run(base_url: str, json_output: str | None) -> int:
+def run(base_url: str, json_output: str | None, mode: str) -> int:
     base_url = base_url.rstrip("/")
 
-    health_cookie_jar = http.cookiejar.CookieJar()
-    health_opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(health_cookie_jar))
-    health = get_json(health_opener, base_url, "/health")
-    if health.get("status") != "ok":
-        print(f"Health check failed: {health}", file=sys.stderr)
-        return 1
+    health: dict[str, Any]
+    if mode == "http":
+        health_cookie_jar = http.cookiejar.CookieJar()
+        health_opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(health_cookie_jar))
+        health = get_json(health_opener, base_url, "/health")
+        if health.get("status") != "ok":
+            print(f"Health check failed: {health}", file=sys.stderr)
+            return 1
+        results = [run_task_http(base_url, task) for task in TASKS]
+    else:
+        health = {"status": "ok", "mode": "local"}
+        results = [run_task_local(task) for task in TASKS]
 
-    results = [run_task(base_url, task) for task in TASKS]
     markdown_table = render_markdown(results)
     print(markdown_table)
 
@@ -266,12 +395,18 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional path to save raw run results as JSON",
     )
+    parser.add_argument(
+        "--mode",
+        default="http",
+        choices=["http", "local"],
+        help="Execution mode: 'http' calls a running server, 'local' runs in-process MedDataOpsEnv.",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    return run(base_url=args.base_url, json_output=args.json_output)
+    return run(base_url=args.base_url, json_output=args.json_output, mode=args.mode)
 
 
 if __name__ == "__main__":
