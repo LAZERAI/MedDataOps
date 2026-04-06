@@ -326,9 +326,21 @@ Measured baseline from `inference.py`:
 | medication_summary | llama-3.1-8b-instant | 0.0000 | 20 | ok |
 | icu_capacity | llama-3.1-8b-instant | 0.0000 | 3 | ok |
 
-Scores measured on 2026-04-04 against lazerai-meddataops.hf.space using `https://api.groq.com/openai/v1` with `llama-3.1-8b-instant`.
+A `0.0000` score with `status=ok` indicates model-capability limits (not environment/runtime failure); the deterministic reference solver below validates that the benchmark pipeline itself is functioning.
+
+Scores measured on 2026-04-04 against lazerai-meddataops.hf.space using an 8B-class model (`llama-3.1-8b-instant`, equivalent scale to `meta-llama/Llama-3.1-8B-Instruct`). Medium and hard tasks exceeded this model's capability at default settings. Larger models (70B+) are expected to score meaningfully on all three tasks. Phase 2 evaluation uses a standard frontier model.
 
 Run note: this benchmark completed without `llm_failed` status. Free-tier TPM limits can still introduce multiple `429` retries and increase runtime.
+
+Reference Solver (deterministic):
+
+| task | solver | score | steps | status |
+|---|---|---:|---:|---|
+| triage_report | reference_solver | 1.0000 | 2 | ok |
+| medication_summary | reference_solver | 1.0000 | 3 | ok |
+| icu_capacity | reference_solver | 0.6343 | 2 | ok |
+
+These values come from `reference_solver.py` against the live Space (`https://lazerai-meddataops.hf.space`).
 
 ## 10. Project Structure
 
