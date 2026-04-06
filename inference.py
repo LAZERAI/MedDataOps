@@ -52,6 +52,15 @@ ACTION_TOKEN_BUDGET = int(os.getenv("ACTION_TOKEN_BUDGET", "2000"))
 APPROX_CHARS_PER_TOKEN = 4
 ACTION_MESSAGE_CHAR_BUDGET = ACTION_TOKEN_BUDGET * APPROX_CHARS_PER_TOKEN
 
+DEFAULT_API_BASE_URL = "https://router.huggingface.co/v1"
+DEFAULT_MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
+
+API_BASE_URL = os.getenv("API_BASE_URL", DEFAULT_API_BASE_URL)
+MODEL_NAME = os.getenv("MODEL_NAME", DEFAULT_MODEL_NAME)
+HF_TOKEN = os.getenv("HF_TOKEN")
+# Optional when environments are created via from_docker_image().
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
+
 SYSTEM_PROMPT = """You are a data engineer at a hospital analytics team. You have been given a messy dataset and a broken SQL query. Your job is to clean the data and fix the query so the report is accurate.
 
 You are interacting with an environment that expects one action per step.
@@ -158,7 +167,7 @@ def _safe_token(value: Any) -> str:
 
 def _emit_start(*, run_id: str, model_name: str, task_ids: list[str], max_steps_per_task: int) -> None:
     print(
-        "[START]"
+        "START"
         f" run_id={_safe_token(run_id)}"
         f" ts_utc={_safe_token(_utc_timestamp())}"
         f" model={_safe_token(model_name)}"
@@ -178,7 +187,7 @@ def _emit_step(
     status: str,
 ) -> None:
     print(
-        "[STEP]"
+        "STEP"
         f" run_id={_safe_token(run_id)}"
         f" task_id={_safe_token(task_id)}"
         f" step={step}"
@@ -194,7 +203,7 @@ def _emit_end(*, run_id: str, results: list[TaskRunResult], total_elapsed: float
     mean_score = sum(result.final_score for result in results) / max(1, task_count)
     status_blob = ",".join(f"{result.task_id}:{result.status}" for result in results)
     print(
-        "[END]"
+        "END"
         f" run_id={_safe_token(run_id)}"
         f" ts_utc={_safe_token(_utc_timestamp())}"
         f" task_count={task_count}"
@@ -204,8 +213,7 @@ def _emit_end(*, run_id: str, results: list[TaskRunResult], total_elapsed: float
     )
 
 
-def _require_env(name: str) -> str:
-    value = os.getenv(name)
+def _require_non_empty(name: str, value: str | None) -> str:
     if value is None or not value.strip():
         raise RuntimeError(f"Missing required environment variable: {name}")
     return value.strip()
@@ -951,9 +959,9 @@ def main() -> None:
     deadline = start_time + TOTAL_RUNTIME_BUDGET_SECONDS
     run_id = f"meddataops-{int(start_time)}"
 
-    api_base_url = _require_env("API_BASE_URL")
-    model_name = _require_env("MODEL_NAME")
-    hf_token = _require_env("HF_TOKEN")
+    api_base_url = API_BASE_URL.strip() if API_BASE_URL else DEFAULT_API_BASE_URL
+    model_name = MODEL_NAME.strip() if MODEL_NAME else DEFAULT_MODEL_NAME
+    hf_token = _require_non_empty("HF_TOKEN", HF_TOKEN)
 
     rng = random.Random(GLOBAL_RANDOM_SEED)
 
