@@ -8,15 +8,23 @@ import random
 import re
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
-from openai import APIConnectionError, APIError, APITimeoutError, OpenAI, RateLimitError
-from pydantic import BaseModel, Field
+try:
+    from openai import APIConnectionError, APIError, APITimeoutError, OpenAI, RateLimitError
+    OPENAI_IMPORT_ERROR: Exception | None = None
+except Exception as exc:  # pragma: no cover - import-time fallback for validator robustness
+    APIConnectionError = Exception  # type: ignore[assignment]
+    APIError = Exception  # type: ignore[assignment]
+    APITimeoutError = Exception  # type: ignore[assignment]
+    RateLimitError = Exception  # type: ignore[assignment]
+    OpenAI = None  # type: ignore[assignment]
+    OPENAI_IMPORT_ERROR = exc
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -155,9 +163,13 @@ class TaskRunResult:
     elapsed_sec: float
 
 
-class ParsedAction(BaseModel):
-    action_type: str = Field(default="noop")
-    parameters: dict[str, Any] = Field(default_factory=dict)
+@dataclass
+class ParsedAction:
+    action_type: str = "noop"
+    parameters: dict[str, Any] = field(default_factory=dict)
+
+    def model_dump(self) -> dict[str, Any]:
+        return {"action_type": self.action_type, "parameters": dict(self.parameters)}
 
 
 def _minimal_deterministic_plans() -> dict[str, list[dict[str, Any]]]:
@@ -948,6 +960,9 @@ def _call_llm_with_retry(
     rng: random.Random,
     deadline: float | None = None,
 ) -> str:
+    if client is None:
+        raise RuntimeError("OpenAI client unavailable")
+
     last_error: Exception | None = None
 
     for attempt in range(1, MAX_API_RETRIES + 1):
@@ -1321,6 +1336,14 @@ def main() -> None:
     rng = random.Random(GLOBAL_RANDOM_SEED)
 
     client: OpenAI | None = None
+    if not use_deterministic_fallback:
+        if OpenAI is None:
+            use_deterministic_fallback = True
+            print(
+                f"[warn] OpenAI SDK unavailable ({OPENAI_IMPORT_ERROR}). Using deterministic fallback.",
+                file=sys.stderr,
+            )
+
     if not use_deterministic_fallback:
         try:
             client = OpenAI(
