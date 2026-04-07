@@ -409,11 +409,13 @@ def _postgres_kwargs() -> dict[str, Any]:
     }
 
 
-def _wait_for_postgres_ready() -> None:
+def _wait_for_postgres_ready(*, timeout_seconds: int | None = None, retry_seconds: float | None = None) -> None:
     start = time.monotonic()
     last_error: Exception | None = None
+    timeout = int(timeout_seconds) if timeout_seconds is not None else POSTGRES_READY_TIMEOUT_SECONDS
+    retry = float(retry_seconds) if retry_seconds is not None else POSTGRES_READY_RETRY_SECONDS
 
-    while time.monotonic() - start < POSTGRES_READY_TIMEOUT_SECONDS:
+    while time.monotonic() - start < timeout:
         try:
             with psycopg2.connect(**_postgres_kwargs()) as conn:
                 with conn.cursor() as cur:
@@ -423,9 +425,9 @@ def _wait_for_postgres_ready() -> None:
             return
         except Exception as exc:  # pragma: no cover - startup infra path
             last_error = exc
-            time.sleep(POSTGRES_READY_RETRY_SECONDS)
+            time.sleep(retry)
 
-    raise RuntimeError(f"PostgreSQL not ready after {POSTGRES_READY_TIMEOUT_SECONDS}s: {last_error}")
+    raise RuntimeError(f"PostgreSQL not ready after {timeout}s: {last_error}")
 
 
 def _resolve_session_id(
@@ -563,16 +565,27 @@ async def unhandled_exception_handler(_request: Request, exc: Exception) -> JSON
 def on_startup() -> None:
     global _db_manager
 
-    _wait_for_postgres_ready()
-    _db_manager = PostgresDataManager(
-        minconn=1,
-        maxconn=8,
-        host=os.getenv("POSTGRES_HOST", "127.0.0.1"),
-        dbname=os.getenv("POSTGRES_DB", "meddataops"),
-        user=os.getenv("POSTGRES_USER", "meddataops"),
-        password=os.getenv("POSTGRES_PASSWORD", "meddataops"),
-        port=int(os.getenv("POSTGRES_PORT", "5432")),
-    )
+    allow_degraded = os.getenv("MEDDATAOPS_ALLOW_DEGRADED_STARTUP", "0") == "1"
+    try:
+        if allow_degraded:
+            _wait_for_postgres_ready(timeout_seconds=min(POSTGRES_READY_TIMEOUT_SECONDS, 5), retry_seconds=1.0)
+        else:
+            _wait_for_postgres_ready()
+        _db_manager = PostgresDataManager(
+            minconn=1,
+            maxconn=8,
+            host=os.getenv("POSTGRES_HOST", "127.0.0.1"),
+            dbname=os.getenv("POSTGRES_DB", "meddataops"),
+            user=os.getenv("POSTGRES_USER", "meddataops"),
+            password=os.getenv("POSTGRES_PASSWORD", "meddataops"),
+            port=int(os.getenv("POSTGRES_PORT", "5432")),
+        )
+    except Exception as exc:
+        if not allow_degraded:
+            raise
+        _db_manager = None
+        logger.warning("PostgreSQL unavailable; continuing in degraded mode: %s", exc)
+
     _install_sigterm_handler()
     logger.info("Startup complete.")
 

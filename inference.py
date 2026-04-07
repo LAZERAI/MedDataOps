@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.cookiejar
 import importlib
 import json
 import os
@@ -11,6 +12,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 from openai import APIConnectionError, APIError, APITimeoutError, OpenAI, RateLimitError
 from pydantic import BaseModel, Field
@@ -54,10 +57,13 @@ ACTION_MESSAGE_CHAR_BUDGET = ACTION_TOKEN_BUDGET * APPROX_CHARS_PER_TOKEN
 
 DEFAULT_API_BASE_URL = "https://router.huggingface.co/v1"
 DEFAULT_MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
+DEFAULT_OPENENV_BASE_URL = "https://lazerai-meddataops.hf.space"
 
 API_BASE_URL = os.getenv("API_BASE_URL", DEFAULT_API_BASE_URL)
 MODEL_NAME = os.getenv("MODEL_NAME", DEFAULT_MODEL_NAME)
 HF_TOKEN = os.getenv("HF_TOKEN")
+OPENENV_BASE_URL = os.getenv("OPENENV_BASE_URL", DEFAULT_OPENENV_BASE_URL)
+OPENENV_HTTP_TIMEOUT_SECONDS = float(os.getenv("OPENENV_HTTP_TIMEOUT_SECONDS", "20"))
 # Optional when environments are created via from_docker_image().
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
@@ -856,6 +862,84 @@ class EnvBridge:
         return 0.0
 
 
+class HttpEnvBridge:
+    def __init__(self, *, base_url: str, seed: int) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._seed = seed
+        self._session_id: str | None = None
+        self._cookie_jar = http.cookiejar.CookieJar()
+        self._opener = urllib_request.build_opener(urllib_request.HTTPCookieProcessor(self._cookie_jar))
+        self._timeout = OPENENV_HTTP_TIMEOUT_SECONDS
+
+        self._request_json(method="GET", path="/health", payload=None)
+
+    def _request_json(self, *, method: str, path: str, payload: dict[str, Any] | None) -> dict[str, Any]:
+        url = f"{self._base_url}{path}"
+        body = json.dumps(payload).encode("utf-8") if payload is not None else None
+
+        req = urllib_request.Request(url=url, data=body, method=method)
+        req.add_header("Accept", "application/json")
+        if payload is not None or method.upper() in {"POST", "PUT", "PATCH"}:
+            req.add_header("Content-Type", "application/json")
+        if self._session_id:
+            req.add_header("X-Session-Id", self._session_id)
+
+        try:
+            with self._opener.open(req, timeout=self._timeout) as response:
+                sid = response.headers.get("X-Session-Id")
+                if sid:
+                    self._session_id = sid
+
+                raw_text = response.read().decode("utf-8", errors="replace")
+                if not raw_text.strip():
+                    return {}
+                parsed = json.loads(raw_text)
+                return parsed if isinstance(parsed, dict) else {"value": parsed}
+        except urllib_error.HTTPError as exc:
+            body_text = exc.read().decode("utf-8", errors="replace") if getattr(exc, "fp", None) else ""
+            raise RuntimeError(f"HTTP {exc.code} {method} {path} failed: {body_text or exc.reason}") from exc
+        except urllib_error.URLError as exc:
+            raise RuntimeError(f"HTTP {method} {path} unreachable: {exc.reason}") from exc
+
+    def reset_task(self, task_id_candidates: list[str], seed: int) -> tuple[dict[str, Any], str]:
+        errors: list[str] = []
+        for task_id in task_id_candidates:
+            try:
+                raw = self._request_json(
+                    method="POST",
+                    path="/reset",
+                    payload={"task_id": task_id, "seed": seed},
+                )
+                if "detail" in raw:
+                    raise RuntimeError(str(raw["detail"]))
+                return _normalize_observation(raw, task_id=task_id, step_number=0), task_id
+            except Exception as exc:
+                errors.append(f"task={task_id} error={exc}")
+
+        raise RuntimeError("Unable to reset remote environment: " + " | ".join(errors[-5:]))
+
+    def step(self, task_id: str, action: dict[str, Any], step_index: int) -> tuple[dict[str, Any], float, bool, dict[str, Any]]:
+        raw = self._request_json(
+            method="POST",
+            path="/step",
+            payload={
+                "action_type": str(action.get("action_type", "")),
+                "parameters": action.get("parameters", {}),
+            },
+        )
+        if "detail" in raw:
+            raise RuntimeError(str(raw["detail"]))
+
+        raw_observation = raw.get("observation", {})
+        reward_obj = raw.get("reward", 0.0)
+        done = bool(raw.get("done", False))
+        info = _to_dict(raw.get("info", {}))
+
+        observation = _normalize_observation(raw_observation, task_id=task_id, step_number=step_index)
+        reward_value = EnvBridge._extract_reward_value(reward_obj)
+        return observation, reward_value, done, info
+
+
 def _call_llm_with_retry(
     *,
     client: OpenAI,
@@ -1249,10 +1333,34 @@ def main() -> None:
             use_deterministic_fallback = True
             print(f"[warn] Failed to initialize OpenAI client ({exc}). Using deterministic fallback.", file=sys.stderr)
 
-    try:
-        env = EnvBridge(seed=GLOBAL_RANDOM_SEED)
-    except Exception as exc:
-        print(f"[fatal] Unable to initialize MedDataOps environment bridge: {exc}", file=sys.stderr)
+    prefer_remote_env = os.getenv("PREFER_REMOTE_ENV", "0") == "1"
+    remote_base_url = OPENENV_BASE_URL.strip() if OPENENV_BASE_URL else DEFAULT_OPENENV_BASE_URL
+
+    env: Any | None = None
+    bridge_errors: list[str] = []
+
+    if not prefer_remote_env:
+        try:
+            env = EnvBridge(seed=GLOBAL_RANDOM_SEED)
+        except Exception as exc:
+            bridge_errors.append(f"local bridge init failed: {exc}")
+
+    if env is None:
+        try:
+            env = HttpEnvBridge(base_url=remote_base_url, seed=GLOBAL_RANDOM_SEED)
+            print(f"[warn] Using remote environment fallback at {remote_base_url}", file=sys.stderr)
+        except Exception as exc:
+            bridge_errors.append(f"remote bridge init failed: {exc}")
+
+    if env is None and prefer_remote_env:
+        try:
+            env = EnvBridge(seed=GLOBAL_RANDOM_SEED)
+            print("[warn] Remote bridge unavailable, falling back to local environment bridge.", file=sys.stderr)
+        except Exception as exc:
+            bridge_errors.append(f"local bridge fallback failed: {exc}")
+
+    if env is None:
+        print(f"[fatal] Unable to initialize any environment bridge: {' | '.join(bridge_errors[-5:])}", file=sys.stderr)
         _emit_start(
             run_id=run_id,
             model_name=model_name,

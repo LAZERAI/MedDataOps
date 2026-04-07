@@ -78,7 +78,7 @@ wait_for_postgres() {
   done
 
   echo "[entrypoint] ERROR: PostgreSQL did not become ready in time." >&2
-  exit 1
+  return 1
 }
 
 discover_postgres_bin() {
@@ -90,7 +90,7 @@ discover_postgres_bin() {
   initdb_path="$(find /usr/lib/postgresql -maxdepth 3 -type f -name initdb 2>/dev/null | sort | tail -n 1 || true)"
   if [[ -z "$initdb_path" ]]; then
     echo "[entrypoint] ERROR: Could not locate initdb binary under /usr/lib/postgresql." >&2
-    exit 1
+    return 1
   fi
 
   export PATH="$(dirname "$initdb_path"):$PATH"
@@ -123,11 +123,17 @@ start_embedded_postgres() {
 
   if [[ ! -s "$PGDATA/PG_VERSION" ]]; then
     log "Initializing PostgreSQL 15 cluster at $PGDATA"
-    run_as_postgres_runtime "initdb -D '$PGDATA' --encoding=UTF8 --locale=C --username=postgres"
+    if ! run_as_postgres_runtime "initdb -D '$PGDATA' --encoding=UTF8 --locale=C --username=postgres"; then
+      log "ERROR: initdb failed; embedded PostgreSQL startup cannot continue"
+      return 1
+    fi
   fi
 
   log "Starting embedded PostgreSQL"
-  run_as_postgres_runtime "pg_ctl -D '$PGDATA' -o \"-c listen_addresses='*' -p ${POSTGRES_PORT} -k '${POSTGRES_SOCKET_DIR}'\" -w start"
+  if ! run_as_postgres_runtime "pg_ctl -D '$PGDATA' -o \"-c listen_addresses='*' -p ${POSTGRES_PORT} -k '${POSTGRES_SOCKET_DIR}'\" -w start"; then
+    log "ERROR: pg_ctl start failed; embedded PostgreSQL startup cannot continue"
+    return 1
+  fi
 
   POSTGRES_HOST="127.0.0.1"
   export POSTGRES_HOST
@@ -154,12 +160,20 @@ END
 SELECT format('CREATE DATABASE %I OWNER %I', '${POSTGRES_DB}', '${POSTGRES_USER}')
 WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '${POSTGRES_DB}')
 \\gexec
-SQL"
+SQL" || {
+    log "ERROR: ensure_db_and_user failed"
+    return 1
+  }
 }
 
 seed_database() {
   log "Seeding MedDataOps datasets"
   python /app/scripts/seed_db.py
+}
+
+enable_degraded_startup_mode() {
+  export MEDDATAOPS_ALLOW_DEGRADED_STARTUP=1
+  log "WARN: running in degraded mode (PostgreSQL setup unavailable)"
 }
 
 start_api() {
@@ -178,9 +192,12 @@ export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-meddataops}"
 export POSTGRES_HOST="${POSTGRES_HOST:-127.0.0.1}"
 export POSTGRES_SOCKET_DIR="${POSTGRES_SOCKET_DIR:-/var/run/postgresql}"
 export EMBEDDED_POSTGRES="${EMBEDDED_POSTGRES:-1}"
+export MEDDATAOPS_ALLOW_DEGRADED_STARTUP="${MEDDATAOPS_ALLOW_DEGRADED_STARTUP:-0}"
 export PYTHONPATH="${PYTHONPATH:-/app/src}"
 
-discover_postgres_bin
+if ! discover_postgres_bin; then
+  enable_degraded_startup_mode
+fi
 configure_nss_wrapper_for_unknown_uid
 
 if [[ -z "${MEDDATAOPS_POSTGRES_DSN:-}" ]]; then
@@ -188,13 +205,23 @@ if [[ -z "${MEDDATAOPS_POSTGRES_DSN:-}" ]]; then
 fi
 
 if [[ "$EMBEDDED_POSTGRES" == "1" ]]; then
-  start_embedded_postgres
-  ensure_db_and_user
-  wait_for_postgres "$POSTGRES_HOST" "$POSTGRES_PORT" "$POSTGRES_USER" "$POSTGRES_DB"
+  if ! start_embedded_postgres; then
+    enable_degraded_startup_mode
+  elif ! ensure_db_and_user; then
+    enable_degraded_startup_mode
+  elif ! wait_for_postgres "$POSTGRES_HOST" "$POSTGRES_PORT" "$POSTGRES_USER" "$POSTGRES_DB"; then
+    enable_degraded_startup_mode
+  fi
 else
   log "Using external PostgreSQL at ${POSTGRES_HOST}:${POSTGRES_PORT}"
-  wait_for_postgres "$POSTGRES_HOST" "$POSTGRES_PORT" "$POSTGRES_USER" "$POSTGRES_DB"
+  if ! wait_for_postgres "$POSTGRES_HOST" "$POSTGRES_PORT" "$POSTGRES_USER" "$POSTGRES_DB"; then
+    enable_degraded_startup_mode
+  fi
 fi
 
-seed_database
+if [[ "$MEDDATAOPS_ALLOW_DEGRADED_STARTUP" != "1" ]]; then
+  seed_database
+else
+  log "WARN: skipping seed_database in degraded startup mode"
+fi
 start_api
