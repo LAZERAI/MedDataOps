@@ -430,6 +430,15 @@ def _truncate_string(value: Any, max_len: int = 220) -> str:
     return text[: max_len - 3] + "..."
 
 
+def _json_dumps_safe(value: Any) -> str:
+    """Serialize arbitrary payloads without raising on non-JSON-native types."""
+    try:
+        return json.dumps(value, ensure_ascii=True, default=str)
+    except Exception:
+        compact = _compact_json_like(value, max_items=10, max_str_len=120)
+        return json.dumps(compact, ensure_ascii=True, default=str)
+
+
 def _compact_json_like(value: Any, *, max_items: int = 8, max_str_len: int = 220) -> Any:
     if isinstance(value, dict):
         result: dict[str, Any] = {}
@@ -1072,18 +1081,18 @@ def format_observation_user_message(
         "",
         "Dataset Summary:",
         f"- row_count: {row_count}",
-        f"- column_names: {json.dumps(column_names, ensure_ascii=True)}",
-        f"- null_count_per_column: {json.dumps(null_count_compact, ensure_ascii=True)}",
-        f"- sample_rows: {json.dumps(sample_rows_compact, ensure_ascii=True)}",
+        f"- column_names: {_json_dumps_safe(column_names)}",
+        f"- null_count_per_column: {_json_dumps_safe(null_count_compact)}",
+        f"- sample_rows: {_json_dumps_safe(sample_rows_compact)}",
         "",
         "Current SQL Query:",
         current_sql_query or "(empty)",
         "",
         "Last Action Result:",
-        json.dumps(compact_last_action, ensure_ascii=True),
+        _json_dumps_safe(compact_last_action),
         "",
         "Error Messages:",
-        json.dumps(compact_errors, ensure_ascii=True),
+        _json_dumps_safe(compact_errors),
     ]
     message = "\n".join(sections)
 
@@ -1105,18 +1114,18 @@ def format_observation_user_message(
             "",
             "Dataset Summary:",
             f"- row_count: {row_count}",
-            f"- column_names: {json.dumps(column_names[:20], ensure_ascii=True)}",
-            f"- null_count_per_column: {json.dumps(null_count_compact, ensure_ascii=True)}",
-            f"- sample_rows: {json.dumps(sample_rows_compact, ensure_ascii=True)}",
+            f"- column_names: {_json_dumps_safe(column_names[:20])}",
+            f"- null_count_per_column: {_json_dumps_safe(null_count_compact)}",
+            f"- sample_rows: {_json_dumps_safe(sample_rows_compact)}",
             "",
             "Current SQL Query:",
             current_sql_query or "(empty)",
             "",
             "Last Action Result:",
-            json.dumps(_compact_json_like(compact_last_action, max_items=8, max_str_len=120), ensure_ascii=True),
+            _json_dumps_safe(_compact_json_like(compact_last_action, max_items=8, max_str_len=120)),
             "",
             "Error Messages:",
-            json.dumps(compact_errors, ensure_ascii=True),
+            _json_dumps_safe(compact_errors),
         ]
         message = "\n".join(sections)
 
@@ -1464,13 +1473,27 @@ def main() -> None:
                 break
 
             steps_remaining = MAX_STEPS_PER_TASK - step_idx
-            user_message = _build_user_message(
-                task_id=resolved_task_id,
-                step_number=step_idx,
-                observation=observation,
-                steps_remaining=steps_remaining,
-                last_action_result=last_action_result,
-            )
+            try:
+                user_message = _build_user_message(
+                    task_id=resolved_task_id,
+                    step_number=step_idx,
+                    observation=observation,
+                    steps_remaining=steps_remaining,
+                    last_action_result=last_action_result,
+                )
+            except Exception as exc:
+                print(
+                    f"[warn] Failed to format observation payload on task {resolved_task_id}, step {step_idx}: {exc}",
+                    file=sys.stderr,
+                )
+                fallback_payload = {
+                    "task_id": resolved_task_id,
+                    "step_number": step_idx,
+                    "steps_remaining": steps_remaining,
+                    "observation": _compact_json_like(observation, max_items=10, max_str_len=160),
+                    "last_action_result": _compact_json_like(last_action_result or {}, max_items=10, max_str_len=160),
+                }
+                user_message = _enforce_message_budget(_json_dumps_safe(fallback_payload), max_chars=ACTION_MESSAGE_CHAR_BUDGET)
 
             messages = [
                 {"role": "system", "content": SYSTEM_PROMPT},
