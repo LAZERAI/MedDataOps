@@ -48,7 +48,7 @@ discover_postgres_bin() {
 
 start_embedded_postgres() {
   mkdir -p "$PGDATA" /var/run/postgresql
-  chown -R postgres:postgres "$PGDATA" /var/run/postgresql
+  chown -R postgres:postgres "$PGDATA" /var/run/postgresql || log "WARN: chown failed (likely restricted sandbox); continuing with existing permissions"
   chmod 700 "$PGDATA"
 
   if [[ ! -s "$PGDATA/PG_VERSION" ]]; then
