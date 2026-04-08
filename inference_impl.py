@@ -113,7 +113,8 @@ DEFAULT_LOCALHOST_SPACE_URL_ALT = "http://localhost:8000"
 
 API_BASE_URL = os.getenv("API_BASE_URL", DEFAULT_API_BASE_URL)
 MODEL_NAME = os.getenv("MODEL_NAME", DEFAULT_MODEL_NAME)
-HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("API_KEY") or "dummy"
+HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("API_KEY") or "no-token"
+SPACE_BASE_URL = os.getenv("SPACE_BASE_URL", "http://localhost:7860").strip() or "http://localhost:7860"
 SPACE_URL = os.getenv("SPACE_URL", "")
 OPENENV_BASE_URL = os.getenv("OPENENV_BASE_URL", "")
 OPENENV_HTTP_TIMEOUT_SECONDS = max(1.0, _env_float("OPENENV_HTTP_TIMEOUT_SECONDS", 12.0))
@@ -794,6 +795,19 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _extract_reward_value(reward_obj: Any) -> float:
+    if isinstance(reward_obj, (int, float)):
+        return float(reward_obj)
+
+    reward_payload = _to_dict(reward_obj)
+    if "total" in reward_payload:
+        return _safe_float(reward_payload["total"], 0.0)
+    if "reward" in reward_payload:
+        return _safe_float(reward_payload["reward"], 0.0)
+
+    return 0.0
+
+
 def _extract_retry_after_seconds(error: Exception) -> Optional[float]:
     text = str(error)
     patterns = [
@@ -808,129 +822,6 @@ def _extract_retry_after_seconds(error: Exception) -> Optional[float]:
             except (TypeError, ValueError):
                 return None
     return None
-
-
-class EnvBridge:
-    def __init__(self, seed: int) -> None:
-        env_module = importlib.import_module("meddataops.env")
-        env_cls = getattr(env_module, "MedDataOpsEnv")
-        self._env = env_cls(seed=seed)
-        self._models_module = importlib.import_module("meddataops.models")
-
-    def _build_action_candidates(self, action: dict[str, Any]) -> list[Any]:
-        action_type = action["action_type"]
-        parameters = action["parameters"]
-
-        candidates: list[Any] = []
-
-        # Modern OpenEnv-style dict payload.
-        if action_type == "noop":
-            # Some env implementations do not support noop in OpenEnv enums.
-            candidates.append({"action_type": "submit", "parameters": {}})
-        else:
-            candidates.append({"action_type": action_type, "parameters": parameters})
-
-        # Legacy dict payload for AgentAction.
-        candidates.append({"action_type": LEGACY_ACTION_MAP.get(action_type, "noop"), "payload": parameters})
-
-        # Try ActionModel if available.
-        action_model_cls = getattr(self._models_module, "ActionModel", None)
-        openenv_enum = getattr(self._models_module, "OpenEnvActionType", None)
-        if action_model_cls is not None and openenv_enum is not None:
-            try:
-                enum_value = openenv_enum(action_type)
-                candidates.append(action_model_cls(action_type=enum_value, parameters=parameters))
-            except Exception:
-                pass
-
-        # Try AgentAction if available.
-        legacy_agent_action_cls = getattr(self._models_module, "AgentAction", None)
-        legacy_enum = getattr(self._models_module, "ActionType", None)
-        if legacy_agent_action_cls is not None and legacy_enum is not None:
-            try:
-                mapped = LEGACY_ACTION_MAP.get(action_type, "noop")
-                enum_value = legacy_enum(mapped)
-                candidates.append(legacy_agent_action_cls(action_type=enum_value, payload=parameters))
-            except Exception:
-                pass
-
-        return candidates
-
-    def reset_task(self, task_id_candidates: list[str], seed: int) -> tuple[dict[str, Any], str]:
-        reset_request_cls = getattr(self._models_module, "ResetRequest", None)
-
-        errors: list[str] = []
-        for task_id in task_id_candidates:
-            attempts: list[tuple[str, Any]] = [
-                ("kwargs", {"task_id": task_id, "seed": seed}),
-                ("dict", {"task_id": task_id, "seed": seed}),
-            ]
-
-            if reset_request_cls is not None:
-                try:
-                    attempts.append(("request", reset_request_cls(task_id=task_id, seed=seed)))
-                except Exception:
-                    pass
-
-            attempts.append(("legacy_task_only", {"task_id": task_id}))
-
-            for mode, payload in attempts:
-                try:
-                    if mode == "kwargs":
-                        raw = self._env.reset(**payload)
-                    else:
-                        raw = self._env.reset(payload)
-                    return _normalize_observation(raw, task_id=task_id, step_number=0), task_id
-                except Exception as exc:
-                    errors.append(f"task={task_id} mode={mode} error={exc}")
-
-        raise RuntimeError("Unable to reset environment for task candidates: " + " | ".join(errors[-5:]))
-
-    def step(self, task_id: str, action: dict[str, Any], step_index: int) -> tuple[dict[str, Any], float, bool, dict[str, Any]]:
-        errors: list[str] = []
-
-        for candidate in self._build_action_candidates(action):
-            try:
-                result = self._env.step(candidate)
-                return self._parse_step_result(task_id=task_id, step_index=step_index, result=result)
-            except Exception as exc:
-                errors.append(str(exc))
-
-        raise RuntimeError("All action payload formats failed in env.step(): " + " | ".join(errors[-5:]))
-
-    def _parse_step_result(
-        self,
-        *,
-        task_id: str,
-        step_index: int,
-        result: Any,
-    ) -> tuple[dict[str, Any], float, bool, dict[str, Any]]:
-        if isinstance(result, tuple) and len(result) >= 4:
-            raw_observation, reward_obj, done, info = result[0], result[1], result[2], result[3]
-        else:
-            result_dict = _to_dict(result)
-            raw_observation = result_dict.get("observation", result)
-            reward_obj = result_dict.get("reward", 0.0)
-            done = bool(result_dict.get("done", False))
-            info = result_dict.get("info", {})
-
-        reward_value = self._extract_reward_value(reward_obj)
-        observation = _normalize_observation(raw_observation, task_id=task_id, step_number=step_index)
-        info_dict = _to_dict(info)
-        return observation, reward_value, bool(done), info_dict
-
-    @staticmethod
-    def _extract_reward_value(reward_obj: Any) -> float:
-        if isinstance(reward_obj, (int, float)):
-            return float(reward_obj)
-
-        reward_payload = _to_dict(reward_obj)
-        if "total" in reward_payload:
-            return _safe_float(reward_payload["total"], 0.0)
-        if "reward" in reward_payload:
-            return _safe_float(reward_payload["reward"], 0.0)
-
-        return 0.0
 
 
 class HttpEnvBridge:
@@ -1004,13 +895,14 @@ class HttpEnvBridge:
             raise RuntimeError(f"HTTP {method} {path} unreachable: {exc.reason}") from exc
 
     def reset_task(self, task_id_candidates: list[str], seed: int) -> tuple[dict[str, Any], str]:
+        _ = seed  # seed is retained in signature for compatibility with existing callers.
         errors: list[str] = []
         for task_id in task_id_candidates:
             try:
                 raw = self._request_json(
                     method="POST",
                     path="/reset",
-                    payload={"task_id": task_id, "seed": seed},
+                    payload={"task_id": task_id},
                 )
                 if "detail" in raw:
                     raise RuntimeError(str(raw["detail"]))
@@ -1038,7 +930,7 @@ class HttpEnvBridge:
         info = _to_dict(raw.get("info", {}))
 
         observation = _normalize_observation(raw_observation, task_id=task_id, step_number=step_index)
-        reward_value = EnvBridge._extract_reward_value(reward_obj)
+        reward_value = _extract_reward_value(reward_obj)
         return observation, reward_value, done, info
 
 
@@ -1430,12 +1322,12 @@ def main() -> None:
 
     api_base_url = API_BASE_URL.strip() if API_BASE_URL else DEFAULT_API_BASE_URL
     model_name = MODEL_NAME.strip() if MODEL_NAME else DEFAULT_MODEL_NAME
-    hf_token = (os.getenv("HF_TOKEN") or os.getenv("API_KEY") or "dummy").strip() or "dummy"
+    hf_token = (os.getenv("HF_TOKEN") or os.getenv("API_KEY") or "no-token").strip() or "no-token"
     use_deterministic_fallback = FORCE_DETERMINISTIC_FALLBACK
 
     if use_deterministic_fallback:
         print("[info] FORCE_DETERMINISTIC_FALLBACK=1; using deterministic policy.", file=sys.stderr)
-    elif hf_token == "dummy":
+    elif hf_token == "no-token":
         use_deterministic_fallback = True
         print("[warn] HF_TOKEN/API_KEY not set. Using deterministic fallback policy.", file=sys.stderr)
 
@@ -1462,7 +1354,7 @@ def main() -> None:
             use_deterministic_fallback = True
             print(f"[warn] Failed to initialize OpenAI client ({exc}). Using deterministic fallback.", file=sys.stderr)
 
-    local_space_candidates: list[str] = []
+    local_space_candidates: list[str] = [SPACE_BASE_URL]
     port_value = os.getenv("PORT", "").strip()
     if port_value.isdigit():
         local_space_candidates.append(f"http://127.0.0.1:{port_value}")
@@ -1474,15 +1366,6 @@ def main() -> None:
     local_space_candidates.append(DEFAULT_LOCAL_SPACE_URL_ALT)
 
     remote_space_candidates: list[str] = []
-
-    # Deterministic fallback must target local validator-hosted HTTP env only.
-    if not use_deterministic_fallback:
-        if SPACE_URL and SPACE_URL.strip():
-            remote_space_candidates.append(SPACE_URL.strip())
-        if OPENENV_BASE_URL and OPENENV_BASE_URL.strip():
-            remote_space_candidates.append(OPENENV_BASE_URL.strip())
-        if ALLOW_EXTERNAL_SPACE_FALLBACK:
-            remote_space_candidates.append(DEFAULT_SPACE_URL)
 
     deduped_local_candidates: list[str] = []
     for candidate in local_space_candidates:
@@ -1516,7 +1399,7 @@ def main() -> None:
                 break
             time.sleep(min(LOCAL_ENV_STARTUP_PROBE_INTERVAL_SECONDS, time_remaining))
 
-    # Optional remote fallback for local/dev diagnostics, disabled by default.
+    # Optional remote fallback, intentionally disabled for validator compatibility.
     if env is None:
         for candidate_url in deduped_remote_candidates:
             try:
