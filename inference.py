@@ -114,9 +114,14 @@ DEFAULT_LOCALHOST_SPACE_URL_ALT = "http://localhost:8000"
 API_BASE_URL = os.getenv("API_BASE_URL", DEFAULT_API_BASE_URL)
 MODEL_NAME = os.getenv("MODEL_NAME", DEFAULT_MODEL_NAME)
 HF_TOKEN = os.getenv("HF_TOKEN")
-SPACE_URL = os.getenv("SPACE_URL", DEFAULT_SPACE_URL)
+SPACE_URL = os.getenv("SPACE_URL", "")
 OPENENV_BASE_URL = os.getenv("OPENENV_BASE_URL", "")
-OPENENV_HTTP_TIMEOUT_SECONDS = max(1.0, _env_float("OPENENV_HTTP_TIMEOUT_SECONDS", 20.0))
+OPENENV_HTTP_TIMEOUT_SECONDS = max(1.0, _env_float("OPENENV_HTTP_TIMEOUT_SECONDS", 12.0))
+OPENENV_HEALTHCHECK_TIMEOUT_SECONDS = max(0.5, _env_float("OPENENV_HEALTHCHECK_TIMEOUT_SECONDS", 2.5))
+FORCE_DETERMINISTIC_FALLBACK = os.getenv("FORCE_DETERMINISTIC_FALLBACK", "1") == "1"
+LOCAL_ENV_STARTUP_PROBE_SECONDS = max(0.0, _env_float("LOCAL_ENV_STARTUP_PROBE_SECONDS", 10.0))
+LOCAL_ENV_STARTUP_PROBE_INTERVAL_SECONDS = max(0.2, _env_float("LOCAL_ENV_STARTUP_PROBE_INTERVAL_SECONDS", 1.0))
+ALLOW_EXTERNAL_SPACE_FALLBACK = os.getenv("ALLOW_EXTERNAL_SPACE_FALLBACK", "0") == "1"
 # Optional when environments are created via from_docker_image().
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
@@ -382,7 +387,7 @@ def _emit_start(*, run_id: str, model_name: str, task_ids: list[str], max_steps_
         f" model={_safe_token(model_name)}"
         f" tasks={_safe_token(','.join(task_ids))}"
         f" max_steps_per_task={max_steps_per_task}"
-    )
+    , flush=True)
 
 
 def _emit_step(
@@ -404,7 +409,7 @@ def _emit_step(
         f" reward={reward:.6f}"
         f" done={'true' if done else 'false'}"
         f" status={_safe_token(status)}"
-    )
+    , flush=True)
 
 
 def _emit_end(*, run_id: str, results: list[TaskRunResult], total_elapsed: float) -> None:
@@ -419,7 +424,7 @@ def _emit_end(*, run_id: str, results: list[TaskRunResult], total_elapsed: float
         f" mean_score={mean_score:.6f}"
         f" total_elapsed_s={total_elapsed:.3f}"
         f" statuses={_safe_token(status_blob)}"
-    )
+    , flush=True)
 
 
 def _require_non_empty(name: str, value: str | None) -> str:
@@ -937,7 +942,12 @@ class HttpEnvBridge:
         self._opener = urllib_request.build_opener(urllib_request.HTTPCookieProcessor(self._cookie_jar))
         self._timeout = OPENENV_HTTP_TIMEOUT_SECONDS
 
-        self._request_json(method="GET", path="/health", payload=None)
+        self._request_json(
+            method="GET",
+            path="/health",
+            payload=None,
+            timeout_seconds=min(self._timeout, OPENENV_HEALTHCHECK_TIMEOUT_SECONDS),
+        )
 
     def _sync_session_id(self, payload: dict[str, Any]) -> None:
         candidates: list[Any] = [
@@ -954,7 +964,14 @@ class HttpEnvBridge:
                 self._session_id = candidate.strip()
                 return
 
-    def _request_json(self, *, method: str, path: str, payload: dict[str, Any] | None) -> dict[str, Any]:
+    def _request_json(
+        self,
+        *,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
         url = f"{self._base_url}{path}"
         body = json.dumps(payload).encode("utf-8") if payload is not None else None
 
@@ -965,8 +982,10 @@ class HttpEnvBridge:
         if self._session_id:
             req.add_header("X-Session-Id", self._session_id)
 
+        effective_timeout = self._timeout if timeout_seconds is None else max(0.5, float(timeout_seconds))
+
         try:
-            with self._opener.open(req, timeout=self._timeout) as response:
+            with self._opener.open(req, timeout=effective_timeout) as response:
                 sid = response.headers.get("X-Session-Id")
                 if sid:
                     self._session_id = sid
@@ -1398,9 +1417,11 @@ def main() -> None:
     api_base_url = API_BASE_URL.strip() if API_BASE_URL else DEFAULT_API_BASE_URL
     model_name = MODEL_NAME.strip() if MODEL_NAME else DEFAULT_MODEL_NAME
     hf_token = HF_TOKEN.strip() if HF_TOKEN else ""
-    use_deterministic_fallback = False
+    use_deterministic_fallback = FORCE_DETERMINISTIC_FALLBACK
 
-    if not hf_token:
+    if use_deterministic_fallback:
+        print("[info] FORCE_DETERMINISTIC_FALLBACK=1; using deterministic policy.", file=sys.stderr)
+    elif not hf_token:
         use_deterministic_fallback = True
         print("[warn] HF_TOKEN not set. Using deterministic fallback policy.", file=sys.stderr)
 
@@ -1427,39 +1448,67 @@ def main() -> None:
             use_deterministic_fallback = True
             print(f"[warn] Failed to initialize OpenAI client ({exc}). Using deterministic fallback.", file=sys.stderr)
 
-    space_candidates: list[str] = []
-    if SPACE_URL and SPACE_URL.strip():
-        space_candidates.append(SPACE_URL.strip())
-    if OPENENV_BASE_URL and OPENENV_BASE_URL.strip():
-        space_candidates.append(OPENENV_BASE_URL.strip())
-
+    local_space_candidates: list[str] = []
     port_value = os.getenv("PORT", "").strip()
     if port_value.isdigit():
-        space_candidates.append(f"http://127.0.0.1:{port_value}")
-        space_candidates.append(f"http://localhost:{port_value}")
+        local_space_candidates.append(f"http://127.0.0.1:{port_value}")
+        local_space_candidates.append(f"http://localhost:{port_value}")
 
-    space_candidates.append(DEFAULT_SPACE_URL)
-    space_candidates.append(DEFAULT_LOCAL_SPACE_URL)
-    space_candidates.append(DEFAULT_LOCALHOST_SPACE_URL)
-    space_candidates.append(DEFAULT_LOCAL_SPACE_URL_ALT)
-    space_candidates.append(DEFAULT_LOCALHOST_SPACE_URL_ALT)
+    local_space_candidates.append(DEFAULT_LOCAL_SPACE_URL)
+    local_space_candidates.append(DEFAULT_LOCALHOST_SPACE_URL)
+    local_space_candidates.append(DEFAULT_LOCAL_SPACE_URL_ALT)
+    local_space_candidates.append(DEFAULT_LOCALHOST_SPACE_URL_ALT)
 
-    deduped_space_candidates: list[str] = []
-    for candidate in space_candidates:
+    remote_space_candidates: list[str] = []
+
+    if SPACE_URL and SPACE_URL.strip():
+        remote_space_candidates.append(SPACE_URL.strip())
+    if OPENENV_BASE_URL and OPENENV_BASE_URL.strip():
+        remote_space_candidates.append(OPENENV_BASE_URL.strip())
+    if ALLOW_EXTERNAL_SPACE_FALLBACK:
+        remote_space_candidates.append(DEFAULT_SPACE_URL)
+
+    deduped_local_candidates: list[str] = []
+    for candidate in local_space_candidates:
         normalized = candidate.strip().rstrip("/")
-        if normalized and normalized not in deduped_space_candidates:
-            deduped_space_candidates.append(normalized)
+        if normalized and normalized not in deduped_local_candidates:
+            deduped_local_candidates.append(normalized)
+
+    deduped_remote_candidates: list[str] = []
+    for candidate in remote_space_candidates:
+        normalized = candidate.strip().rstrip("/")
+        if normalized and normalized not in deduped_remote_candidates:
+            deduped_remote_candidates.append(normalized)
 
     env: Any | None = None
     bridge_errors: list[str] = []
 
-    for candidate_url in deduped_space_candidates:
-        try:
-            env = HttpEnvBridge(base_url=candidate_url, seed=GLOBAL_RANDOM_SEED)
-            print(f"[info] Using HTTP environment at {candidate_url}", file=sys.stderr)
-            break
-        except Exception as exc:
-            bridge_errors.append(f"{candidate_url} -> {exc}")
+    # Probe local validator-hosted endpoints for a short startup window.
+    local_probe_deadline = time.monotonic() + LOCAL_ENV_STARTUP_PROBE_SECONDS
+    while env is None and time.monotonic() <= local_probe_deadline:
+        for candidate_url in deduped_local_candidates:
+            try:
+                env = HttpEnvBridge(base_url=candidate_url, seed=GLOBAL_RANDOM_SEED)
+                print(f"[info] Using local HTTP environment at {candidate_url}", file=sys.stderr)
+                break
+            except Exception as exc:
+                bridge_errors.append(f"{candidate_url} -> {exc}")
+
+        if env is None:
+            time_remaining = local_probe_deadline - time.monotonic()
+            if time_remaining <= 0:
+                break
+            time.sleep(min(LOCAL_ENV_STARTUP_PROBE_INTERVAL_SECONDS, time_remaining))
+
+    # Optional remote fallback for local/dev diagnostics, disabled by default.
+    if env is None:
+        for candidate_url in deduped_remote_candidates:
+            try:
+                env = HttpEnvBridge(base_url=candidate_url, seed=GLOBAL_RANDOM_SEED)
+                print(f"[info] Using remote HTTP environment at {candidate_url}", file=sys.stderr)
+                break
+            except Exception as exc:
+                bridge_errors.append(f"{candidate_url} -> {exc}")
 
     if env is None:
         print(f"[fatal] Unable to initialize any HTTP environment: {' | '.join(bridge_errors[-5:])}", file=sys.stderr)
