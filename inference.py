@@ -938,7 +938,6 @@ class HttpEnvBridge:
         candidates: list[Any] = [
             payload.get("session_id"),
             payload.get("sessionId"),
-            payload.get("session"),
         ]
 
         meta = payload.get("meta")
