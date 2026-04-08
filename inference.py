@@ -106,11 +106,14 @@ ACTION_MESSAGE_CHAR_BUDGET = ACTION_TOKEN_BUDGET * APPROX_CHARS_PER_TOKEN
 DEFAULT_API_BASE_URL = "https://router.huggingface.co/v1"
 DEFAULT_MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
 DEFAULT_SPACE_URL = "https://lazerai-meddataops.hf.space"
+DEFAULT_LOCAL_SPACE_URL = "http://127.0.0.1:8000"
+DEFAULT_LOCALHOST_SPACE_URL = "http://localhost:8000"
 
 API_BASE_URL = os.getenv("API_BASE_URL", DEFAULT_API_BASE_URL)
 MODEL_NAME = os.getenv("MODEL_NAME", DEFAULT_MODEL_NAME)
 HF_TOKEN = os.getenv("HF_TOKEN")
 SPACE_URL = os.getenv("SPACE_URL", DEFAULT_SPACE_URL)
+OPENENV_BASE_URL = os.getenv("OPENENV_BASE_URL", "")
 OPENENV_HTTP_TIMEOUT_SECONDS = max(1.0, _env_float("OPENENV_HTTP_TIMEOUT_SECONDS", 20.0))
 # Optional when environments are created via from_docker_image().
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
@@ -1001,10 +1004,8 @@ class HttpEnvBridge:
             method="POST",
             path="/step",
             payload={
-                "task_id": task_id,
                 "action_type": str(action.get("action_type", "")),
                 "parameters": action.get("parameters", {}),
-                "step_index": step_index,
             },
         )
         if "detail" in raw:
@@ -1424,19 +1425,34 @@ def main() -> None:
             use_deterministic_fallback = True
             print(f"[warn] Failed to initialize OpenAI client ({exc}). Using deterministic fallback.", file=sys.stderr)
 
-    remote_base_url = SPACE_URL.strip() if SPACE_URL else DEFAULT_SPACE_URL
+    space_candidates: list[str] = []
+    if SPACE_URL and SPACE_URL.strip():
+        space_candidates.append(SPACE_URL.strip())
+    if OPENENV_BASE_URL and OPENENV_BASE_URL.strip():
+        space_candidates.append(OPENENV_BASE_URL.strip())
+    space_candidates.append(DEFAULT_SPACE_URL)
+    space_candidates.append(DEFAULT_LOCAL_SPACE_URL)
+    space_candidates.append(DEFAULT_LOCALHOST_SPACE_URL)
+
+    deduped_space_candidates: list[str] = []
+    for candidate in space_candidates:
+        normalized = candidate.strip().rstrip("/")
+        if normalized and normalized not in deduped_space_candidates:
+            deduped_space_candidates.append(normalized)
 
     env: Any | None = None
     bridge_errors: list[str] = []
 
-    try:
-        env = HttpEnvBridge(base_url=remote_base_url, seed=GLOBAL_RANDOM_SEED)
-        print(f"[info] Using live Space HTTP environment at {remote_base_url}", file=sys.stderr)
-    except Exception as exc:
-        bridge_errors.append(f"remote bridge init failed: {exc}")
+    for candidate_url in deduped_space_candidates:
+        try:
+            env = HttpEnvBridge(base_url=candidate_url, seed=GLOBAL_RANDOM_SEED)
+            print(f"[info] Using HTTP environment at {candidate_url}", file=sys.stderr)
+            break
+        except Exception as exc:
+            bridge_errors.append(f"{candidate_url} -> {exc}")
 
     if env is None:
-        print(f"[fatal] Unable to initialize live Space HTTP environment: {' | '.join(bridge_errors[-5:])}", file=sys.stderr)
+        print(f"[fatal] Unable to initialize any HTTP environment: {' | '.join(bridge_errors[-5:])}", file=sys.stderr)
         _emit_start(
             run_id=run_id,
             model_name=model_name,
@@ -1663,7 +1679,7 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except Exception as exc:  # pragma: no cover - final safety guard for validator stability
+    except BaseException as exc:  # pragma: no cover - final safety guard for validator stability
         print(f"[fatal] Unhandled inference exception: {exc}", file=sys.stderr)
         # Exit 0 to prevent fail-fast on uncaught runtime errors; failures are encoded in logs/status lines.
         sys.exit(0)
