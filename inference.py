@@ -105,12 +105,12 @@ ACTION_MESSAGE_CHAR_BUDGET = ACTION_TOKEN_BUDGET * APPROX_CHARS_PER_TOKEN
 
 DEFAULT_API_BASE_URL = "https://router.huggingface.co/v1"
 DEFAULT_MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
-DEFAULT_OPENENV_BASE_URL = "https://lazerai-meddataops.hf.space"
+DEFAULT_SPACE_URL = "https://lazerai-meddataops.hf.space"
 
 API_BASE_URL = os.getenv("API_BASE_URL", DEFAULT_API_BASE_URL)
 MODEL_NAME = os.getenv("MODEL_NAME", DEFAULT_MODEL_NAME)
 HF_TOKEN = os.getenv("HF_TOKEN")
-OPENENV_BASE_URL = os.getenv("OPENENV_BASE_URL", DEFAULT_OPENENV_BASE_URL)
+SPACE_URL = os.getenv("SPACE_URL", DEFAULT_SPACE_URL)
 OPENENV_HTTP_TIMEOUT_SECONDS = max(1.0, _env_float("OPENENV_HTTP_TIMEOUT_SECONDS", 20.0))
 # Optional when environments are created via from_docker_image().
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
@@ -934,6 +934,22 @@ class HttpEnvBridge:
 
         self._request_json(method="GET", path="/health", payload=None)
 
+    def _sync_session_id(self, payload: dict[str, Any]) -> None:
+        candidates: list[Any] = [
+            payload.get("session_id"),
+            payload.get("sessionId"),
+            payload.get("session"),
+        ]
+
+        meta = payload.get("meta")
+        if isinstance(meta, dict):
+            candidates.extend([meta.get("session_id"), meta.get("sessionId")])
+
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                self._session_id = candidate.strip()
+                return
+
     def _request_json(self, *, method: str, path: str, payload: dict[str, Any] | None) -> dict[str, Any]:
         url = f"{self._base_url}{path}"
         body = json.dumps(payload).encode("utf-8") if payload is not None else None
@@ -955,7 +971,9 @@ class HttpEnvBridge:
                 if not raw_text.strip():
                     return {}
                 parsed = json.loads(raw_text)
-                return parsed if isinstance(parsed, dict) else {"value": parsed}
+                parsed_payload = parsed if isinstance(parsed, dict) else {"value": parsed}
+                self._sync_session_id(parsed_payload)
+                return parsed_payload
         except urllib_error.HTTPError as exc:
             body_text = exc.read().decode("utf-8", errors="replace") if getattr(exc, "fp", None) else ""
             raise RuntimeError(f"HTTP {exc.code} {method} {path} failed: {body_text or exc.reason}") from exc
@@ -984,8 +1002,10 @@ class HttpEnvBridge:
             method="POST",
             path="/step",
             payload={
+                "task_id": task_id,
                 "action_type": str(action.get("action_type", "")),
                 "parameters": action.get("parameters", {}),
+                "step_index": step_index,
             },
         )
         if "detail" in raw:
@@ -1250,7 +1270,7 @@ def _resolve_task_candidates(task_entry: dict[str, Any]) -> list[str]:
 
 def _run_deterministic_task(
     *,
-    env: EnvBridge,
+    env: Any,
     run_id: str,
     task_candidates: list[str],
     task_seed: int,
@@ -1405,34 +1425,19 @@ def main() -> None:
             use_deterministic_fallback = True
             print(f"[warn] Failed to initialize OpenAI client ({exc}). Using deterministic fallback.", file=sys.stderr)
 
-    prefer_remote_env = os.getenv("PREFER_REMOTE_ENV", "0") == "1"
-    remote_base_url = OPENENV_BASE_URL.strip() if OPENENV_BASE_URL else DEFAULT_OPENENV_BASE_URL
+    remote_base_url = SPACE_URL.strip() if SPACE_URL else DEFAULT_SPACE_URL
 
     env: Any | None = None
     bridge_errors: list[str] = []
 
-    if not prefer_remote_env:
-        try:
-            env = EnvBridge(seed=GLOBAL_RANDOM_SEED)
-        except Exception as exc:
-            bridge_errors.append(f"local bridge init failed: {exc}")
+    try:
+        env = HttpEnvBridge(base_url=remote_base_url, seed=GLOBAL_RANDOM_SEED)
+        print(f"[info] Using live Space HTTP environment at {remote_base_url}", file=sys.stderr)
+    except Exception as exc:
+        bridge_errors.append(f"remote bridge init failed: {exc}")
 
     if env is None:
-        try:
-            env = HttpEnvBridge(base_url=remote_base_url, seed=GLOBAL_RANDOM_SEED)
-            print(f"[warn] Using remote environment fallback at {remote_base_url}", file=sys.stderr)
-        except Exception as exc:
-            bridge_errors.append(f"remote bridge init failed: {exc}")
-
-    if env is None and prefer_remote_env:
-        try:
-            env = EnvBridge(seed=GLOBAL_RANDOM_SEED)
-            print("[warn] Remote bridge unavailable, falling back to local environment bridge.", file=sys.stderr)
-        except Exception as exc:
-            bridge_errors.append(f"local bridge fallback failed: {exc}")
-
-    if env is None:
-        print(f"[fatal] Unable to initialize any environment bridge: {' | '.join(bridge_errors[-5:])}", file=sys.stderr)
+        print(f"[fatal] Unable to initialize live Space HTTP environment: {' | '.join(bridge_errors[-5:])}", file=sys.stderr)
         _emit_start(
             run_id=run_id,
             model_name=model_name,
