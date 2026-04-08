@@ -106,8 +106,10 @@ ACTION_MESSAGE_CHAR_BUDGET = ACTION_TOKEN_BUDGET * APPROX_CHARS_PER_TOKEN
 DEFAULT_API_BASE_URL = "https://router.huggingface.co/v1"
 DEFAULT_MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
 DEFAULT_SPACE_URL = "https://lazerai-meddataops.hf.space"
-DEFAULT_LOCAL_SPACE_URL = "http://127.0.0.1:8000"
-DEFAULT_LOCALHOST_SPACE_URL = "http://localhost:8000"
+DEFAULT_LOCAL_SPACE_URL = "http://127.0.0.1:7860"
+DEFAULT_LOCALHOST_SPACE_URL = "http://localhost:7860"
+DEFAULT_LOCAL_SPACE_URL_ALT = "http://127.0.0.1:8000"
+DEFAULT_LOCALHOST_SPACE_URL_ALT = "http://localhost:8000"
 
 API_BASE_URL = os.getenv("API_BASE_URL", DEFAULT_API_BASE_URL)
 MODEL_NAME = os.getenv("MODEL_NAME", DEFAULT_MODEL_NAME)
@@ -1430,9 +1432,17 @@ def main() -> None:
         space_candidates.append(SPACE_URL.strip())
     if OPENENV_BASE_URL and OPENENV_BASE_URL.strip():
         space_candidates.append(OPENENV_BASE_URL.strip())
+
+    port_value = os.getenv("PORT", "").strip()
+    if port_value.isdigit():
+        space_candidates.append(f"http://127.0.0.1:{port_value}")
+        space_candidates.append(f"http://localhost:{port_value}")
+
     space_candidates.append(DEFAULT_SPACE_URL)
     space_candidates.append(DEFAULT_LOCAL_SPACE_URL)
     space_candidates.append(DEFAULT_LOCALHOST_SPACE_URL)
+    space_candidates.append(DEFAULT_LOCAL_SPACE_URL_ALT)
+    space_candidates.append(DEFAULT_LOCALHOST_SPACE_URL_ALT)
 
     deduped_space_candidates: list[str] = []
     for candidate in space_candidates:
