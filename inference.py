@@ -11,13 +11,13 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 try:
     from openai import APIConnectionError, APIError, APITimeoutError, OpenAI, RateLimitError
-    OPENAI_IMPORT_ERROR: Exception | None = None
+    OPENAI_IMPORT_ERROR: Optional[Exception] = None
 except Exception as exc:  # pragma: no cover - import-time fallback for validator robustness
     APIConnectionError = Exception  # type: ignore[assignment]
     APIError = Exception  # type: ignore[assignment]
@@ -61,7 +61,7 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-def _env_optional_int(name: str) -> int | None:
+def _env_optional_int(name: str) -> Optional[int]:
     raw = os.getenv(name)
     if raw is None:
         return None
@@ -427,7 +427,7 @@ def _emit_end(*, run_id: str, results: list[TaskRunResult], total_elapsed: float
     , flush=True)
 
 
-def _require_non_empty(name: str, value: str | None) -> str:
+def _require_non_empty(name: str, value: Optional[str]) -> str:
     if value is None or not value.strip():
         raise RuntimeError(f"Missing required environment variable: {name}")
     return value.strip()
@@ -692,7 +692,7 @@ def _build_parsed_action(data: dict[str, Any]) -> ParsedAction:
     return ParsedAction(action_type=action_type, parameters=parameters)
 
 
-def _try_parse_json_candidate(candidate: str) -> ParsedAction | None:
+def _try_parse_json_candidate(candidate: str) -> Optional[ParsedAction]:
     for payload in (candidate, _repair_json(candidate)):
         payload = payload.strip()
         if not payload:
@@ -706,7 +706,7 @@ def _try_parse_json_candidate(candidate: str) -> ParsedAction | None:
     return None
 
 
-def _parse_key_value_action(text: str) -> ParsedAction | None:
+def _parse_key_value_action(text: str) -> Optional[ParsedAction]:
     action_match = re.search(r"action_type\s*[:=]\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)", text, flags=re.IGNORECASE)
     if action_match is None:
         return None
@@ -794,7 +794,7 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def _extract_retry_after_seconds(error: Exception) -> float | None:
+def _extract_retry_after_seconds(error: Exception) -> Optional[float]:
     text = str(error)
     patterns = [
         r"Please try again in\s*([0-9]+(?:\.[0-9]+)?)s",
@@ -937,7 +937,7 @@ class HttpEnvBridge:
     def __init__(self, *, base_url: str, seed: int) -> None:
         self._base_url = base_url.rstrip("/")
         self._seed = seed
-        self._session_id: str | None = None
+        self._session_id: Optional[str] = None
         self._cookie_jar = http.cookiejar.CookieJar()
         self._opener = urllib_request.build_opener(urllib_request.HTTPCookieProcessor(self._cookie_jar))
         self._timeout = OPENENV_HTTP_TIMEOUT_SECONDS
@@ -969,8 +969,8 @@ class HttpEnvBridge:
         *,
         method: str,
         path: str,
-        payload: dict[str, Any] | None,
-        timeout_seconds: float | None = None,
+        payload: Optional[dict[str, Any]],
+        timeout_seconds: Optional[float] = None,
     ) -> dict[str, Any]:
         url = f"{self._base_url}{path}"
         body = json.dumps(payload).encode("utf-8") if payload is not None else None
@@ -1044,16 +1044,16 @@ class HttpEnvBridge:
 
 def _call_llm_with_retry(
     *,
-    client: OpenAI,
+    client: Any,
     model_name: str,
     messages: list[dict[str, str]],
     rng: random.Random,
-    deadline: float | None = None,
+    deadline: Optional[float] = None,
 ) -> str:
     if client is None:
         raise RuntimeError("OpenAI client unavailable")
 
-    last_error: Exception | None = None
+    last_error: Optional[Exception] = None
 
     for attempt in range(1, MAX_API_RETRIES + 1):
         timeout_seconds = float(REQUEST_TIMEOUT_SECONDS)
@@ -1117,7 +1117,7 @@ def format_observation_user_message(
     step_number: int,
     steps_remaining: int,
     observation: dict[str, Any],
-    last_action_result: dict[str, Any] | None,
+    last_action_result: Optional[dict[str, Any]],
     max_tokens: int = ACTION_TOKEN_BUDGET,
 ) -> str:
     char_budget = max(800, int(max_tokens * APPROX_CHARS_PER_TOKEN))
@@ -1218,7 +1218,7 @@ def _build_user_message(
     step_number: int,
     observation: dict[str, Any],
     steps_remaining: int,
-    last_action_result: dict[str, Any] | None,
+    last_action_result: Optional[dict[str, Any]],
 ) -> str:
     return format_observation_user_message(
         task_id=task_id,
@@ -1427,7 +1427,7 @@ def main() -> None:
 
     rng = random.Random(GLOBAL_RANDOM_SEED)
 
-    client: OpenAI | None = None
+    client: Any = None
     if not use_deterministic_fallback:
         if OpenAI is None:
             use_deterministic_fallback = True
@@ -1480,7 +1480,7 @@ def main() -> None:
         if normalized and normalized not in deduped_remote_candidates:
             deduped_remote_candidates.append(normalized)
 
-    env: Any | None = None
+    env: Optional[Any] = None
     bridge_errors: list[str] = []
 
     # Probe local validator-hosted endpoints for a short startup window.
