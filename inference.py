@@ -33,16 +33,56 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = str(raw).strip()
+    if not value:
+        return default
+    try:
+        return int(value)
+    except Exception:
+        print(f"[warn] Invalid {name}={raw!r}; using default {default}.", file=sys.stderr)
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = str(raw).strip()
+    if not value:
+        return default
+    try:
+        return float(value)
+    except Exception:
+        print(f"[warn] Invalid {name}={raw!r}; using default {default}.", file=sys.stderr)
+        return default
+
+
+def _env_optional_int(name: str) -> int | None:
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    if not value:
+        return None
+    try:
+        return int(value)
+    except Exception:
+        print(f"[warn] Invalid {name}={raw!r}; ignoring override.", file=sys.stderr)
+        return None
+
+
 TOTAL_RUNTIME_BUDGET_SECONDS = 19 * 60
 REQUEST_TIMEOUT_SECONDS = 45
-MAX_API_RETRIES = int(os.getenv("MAX_API_RETRIES", "4"))
-MAX_STEPS_PER_TASK = int(os.getenv("MAX_STEPS_PER_TASK", "20"))
-GLOBAL_RANDOM_SEED = int(os.getenv("GLOBAL_RANDOM_SEED", "42"))
-MODEL_TEMPERATURE = float(os.getenv("MODEL_TEMPERATURE", "0.0"))
-MODEL_TOP_P = float(os.getenv("MODEL_TOP_P", "1.0"))
-
-_max_output_tokens_raw = os.getenv("MODEL_MAX_OUTPUT_TOKENS", "").strip()
-MODEL_MAX_OUTPUT_TOKENS = int(_max_output_tokens_raw) if _max_output_tokens_raw else None
+MAX_API_RETRIES = max(1, _env_int("MAX_API_RETRIES", 4))
+MAX_STEPS_PER_TASK = max(1, _env_int("MAX_STEPS_PER_TASK", 20))
+GLOBAL_RANDOM_SEED = _env_int("GLOBAL_RANDOM_SEED", 42)
+MODEL_TEMPERATURE = _env_float("MODEL_TEMPERATURE", 0.0)
+MODEL_TOP_P = _env_float("MODEL_TOP_P", 1.0)
+MODEL_MAX_OUTPUT_TOKENS = _env_optional_int("MODEL_MAX_OUTPUT_TOKENS")
 
 TASK_RUN_ORDER = [
     {"id": "triage_report", "aliases": ["easy"], "seed": 101},
@@ -59,7 +99,7 @@ LEGACY_ACTION_MAP = {
     "submit": "submit",
 }
 
-ACTION_TOKEN_BUDGET = int(os.getenv("ACTION_TOKEN_BUDGET", "2000"))
+ACTION_TOKEN_BUDGET = max(256, _env_int("ACTION_TOKEN_BUDGET", 2000))
 APPROX_CHARS_PER_TOKEN = 4
 ACTION_MESSAGE_CHAR_BUDGET = ACTION_TOKEN_BUDGET * APPROX_CHARS_PER_TOKEN
 
@@ -71,7 +111,7 @@ API_BASE_URL = os.getenv("API_BASE_URL", DEFAULT_API_BASE_URL)
 MODEL_NAME = os.getenv("MODEL_NAME", DEFAULT_MODEL_NAME)
 HF_TOKEN = os.getenv("HF_TOKEN")
 OPENENV_BASE_URL = os.getenv("OPENENV_BASE_URL", DEFAULT_OPENENV_BASE_URL)
-OPENENV_HTTP_TIMEOUT_SECONDS = float(os.getenv("OPENENV_HTTP_TIMEOUT_SECONDS", "20"))
+OPENENV_HTTP_TIMEOUT_SECONDS = max(1.0, _env_float("OPENENV_HTTP_TIMEOUT_SECONDS", 20.0))
 # Optional when environments are created via from_docker_image().
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
