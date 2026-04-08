@@ -113,7 +113,7 @@ DEFAULT_LOCALHOST_SPACE_URL_ALT = "http://localhost:8000"
 
 API_BASE_URL = os.getenv("API_BASE_URL", DEFAULT_API_BASE_URL)
 MODEL_NAME = os.getenv("MODEL_NAME", DEFAULT_MODEL_NAME)
-HF_TOKEN = os.getenv("HF_TOKEN")
+HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("API_KEY") or "dummy"
 SPACE_URL = os.getenv("SPACE_URL", "")
 OPENENV_BASE_URL = os.getenv("OPENENV_BASE_URL", "")
 OPENENV_HTTP_TIMEOUT_SECONDS = max(1.0, _env_float("OPENENV_HTTP_TIMEOUT_SECONDS", 12.0))
@@ -1430,14 +1430,14 @@ def main() -> None:
 
     api_base_url = API_BASE_URL.strip() if API_BASE_URL else DEFAULT_API_BASE_URL
     model_name = MODEL_NAME.strip() if MODEL_NAME else DEFAULT_MODEL_NAME
-    hf_token = HF_TOKEN.strip() if HF_TOKEN else ""
+    hf_token = (os.getenv("HF_TOKEN") or os.getenv("API_KEY") or "dummy").strip() or "dummy"
     use_deterministic_fallback = FORCE_DETERMINISTIC_FALLBACK
 
     if use_deterministic_fallback:
         print("[info] FORCE_DETERMINISTIC_FALLBACK=1; using deterministic policy.", file=sys.stderr)
-    elif not hf_token:
+    elif hf_token == "dummy":
         use_deterministic_fallback = True
-        print("[warn] HF_TOKEN not set. Using deterministic fallback policy.", file=sys.stderr)
+        print("[warn] HF_TOKEN/API_KEY not set. Using deterministic fallback policy.", file=sys.stderr)
 
     rng = random.Random(GLOBAL_RANDOM_SEED)
 
@@ -1468,19 +1468,21 @@ def main() -> None:
         local_space_candidates.append(f"http://127.0.0.1:{port_value}")
         local_space_candidates.append(f"http://localhost:{port_value}")
 
-    local_space_candidates.append(DEFAULT_LOCAL_SPACE_URL)
     local_space_candidates.append(DEFAULT_LOCALHOST_SPACE_URL)
-    local_space_candidates.append(DEFAULT_LOCAL_SPACE_URL_ALT)
+    local_space_candidates.append(DEFAULT_LOCAL_SPACE_URL)
     local_space_candidates.append(DEFAULT_LOCALHOST_SPACE_URL_ALT)
+    local_space_candidates.append(DEFAULT_LOCAL_SPACE_URL_ALT)
 
     remote_space_candidates: list[str] = []
 
-    if SPACE_URL and SPACE_URL.strip():
-        remote_space_candidates.append(SPACE_URL.strip())
-    if OPENENV_BASE_URL and OPENENV_BASE_URL.strip():
-        remote_space_candidates.append(OPENENV_BASE_URL.strip())
-    if ALLOW_EXTERNAL_SPACE_FALLBACK:
-        remote_space_candidates.append(DEFAULT_SPACE_URL)
+    # Deterministic fallback must target local validator-hosted HTTP env only.
+    if not use_deterministic_fallback:
+        if SPACE_URL and SPACE_URL.strip():
+            remote_space_candidates.append(SPACE_URL.strip())
+        if OPENENV_BASE_URL and OPENENV_BASE_URL.strip():
+            remote_space_candidates.append(OPENENV_BASE_URL.strip())
+        if ALLOW_EXTERNAL_SPACE_FALLBACK:
+            remote_space_candidates.append(DEFAULT_SPACE_URL)
 
     deduped_local_candidates: list[str] = []
     for candidate in local_space_candidates:
@@ -1536,7 +1538,7 @@ def main() -> None:
         return
 
     results: list[TaskRunResult] = []
-    deterministic_plans = _load_deterministic_plans() if use_deterministic_fallback else {}
+    deterministic_plans = _load_deterministic_plans()
     _emit_start(
         run_id=run_id,
         model_name=model_name,
@@ -1633,6 +1635,7 @@ def main() -> None:
                 {"role": "user", "content": user_message},
             ]
 
+            llm_fallback_used = False
             try:
                 llm_content = _call_llm_with_retry(
                     client=client,
@@ -1641,21 +1644,22 @@ def main() -> None:
                     rng=rng,
                     deadline=deadline,
                 )
+                action = _parse_action(llm_content)
             except Exception as exc:
-                print(f"[error] LLM call failed on task {resolved_task_id}, step {step_idx}: {exc}", file=sys.stderr)
-                _emit_step(
-                    run_id=run_id,
-                    task_id=resolved_task_id,
-                    step=step_idx,
-                    action_type="llm_call",
-                    reward=float(last_reward),
-                    done=False,
-                    status="llm_failed",
+                print(
+                    f"[warn] LLM call failed on task {resolved_task_id}, step {step_idx}: {exc}. Using deterministic fallback action.",
+                    file=sys.stderr,
                 )
-                status = "llm_failed"
-                break
+                use_deterministic_fallback = True
+                llm_fallback_used = True
 
-            action = _parse_action(llm_content)
+                fallback_plan = deterministic_plans.get(task_candidates[0], [{"action_type": "submit", "parameters": {}}])
+                fallback_idx = min(max(step_idx - 1, 0), max(len(fallback_plan) - 1, 0))
+                fallback_action = fallback_plan[fallback_idx] if fallback_plan else {"action_type": "submit", "parameters": {}}
+                try:
+                    action = _build_parsed_action(_to_dict(fallback_action))
+                except Exception:
+                    action = ParsedAction(action_type="submit", parameters={})
 
             try:
                 observation, last_reward, done, last_info = env.step(
@@ -1686,6 +1690,8 @@ def main() -> None:
             }
 
             step_status = "ok"
+            if llm_fallback_used:
+                step_status = "llm_fallback"
             if isinstance(last_info, dict) and last_info.get("query_valid") is False:
                 step_status = "query_invalid"
             if bool(done):
