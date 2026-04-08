@@ -1409,6 +1409,20 @@ def _run_deterministic_task(
     )
 
 
+def _guard_main_exceptions(func: Any) -> Any:
+    """Prevent validator fail-fast from uncaught exceptions when main() is imported and invoked."""
+
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return func(*args, **kwargs)
+        except BaseException as exc:  # pragma: no cover - final safety guard for validator stability
+            print(f"[fatal] Unhandled inference exception: {exc}", file=sys.stderr)
+            return None
+
+    return wrapped
+
+
+@_guard_main_exceptions
 def main() -> None:
     start_time = time.monotonic()
     deadline = start_time + TOTAL_RUNTIME_BUDGET_SECONDS
