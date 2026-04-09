@@ -1,13 +1,22 @@
 from __future__ import annotations
-import json, os, sys, time, random, re
+
+import http.cookiejar
+import json
+import os
+import re
+import sys
+import time
+import urllib.request
 from datetime import datetime, timezone
-from typing import Any
-import urllib.request, http.cookiejar
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "meta-llama/Llama-3.1-8B-Instruct")
 HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("API_KEY") or "no-token"
-SPACE_URL = os.getenv("SPACE_URL", "http://localhost:7860")
+SPACE_URL = os.getenv("SPACE_URL", "https://lazerai-meddataops.hf.space")
+HEALTH_CHECK_URLS = [
+    os.getenv("SPACE_URL", "https://lazerai-meddataops.hf.space"),
+    "http://localhost:7860",
+]
 
 TASKS = [
     {"id": "triage_report", "seed": 101},
@@ -49,13 +58,31 @@ def _post(opener, url, payload=None):
         return json.loads(r.read().decode()), r.headers.get('X-Session-Id', '')
 
 
-def run_task(task_id, seed, run_id):
+def find_working_url() -> str:
+    urls = [
+        os.getenv("SPACE_URL", "https://lazerai-meddataops.hf.space"),
+        "http://localhost:7860",
+        "http://127.0.0.1:7860",
+    ]
+
+    for url in urls:
+        for _ in range(3):
+            try:
+                urllib.request.urlopen(f"{url}/health", timeout=5)
+                return url.rstrip("/")
+            except Exception:
+                time.sleep(1)
+
+    return urls[0].rstrip("/")
+
+
+def run_task(task_id, seed, run_id, base_url):
     cj = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
     sid = ''
     try:
-        obs, sid = _post(opener, f"{SPACE_URL}/reset", {"task_id": task_id, "seed": seed})
-    except Exception as e:
+        _obs, sid = _post(opener, f"{base_url}/reset", {"task_id": task_id, "seed": seed})
+    except Exception:
         print(f"[STEP] run_id={_safe(run_id)} task_id={_safe(task_id)} step=0 action_type=reset reward=0.000000 done=true status=reset_failed", flush=True)
         return 0.0
 
@@ -65,14 +92,14 @@ def run_task(task_id, seed, run_id):
         try:
             if sid:
                 cj.clear()
-                req = urllib.request.Request(f"{SPACE_URL}/step",
+                req = urllib.request.Request(f"{base_url}/step",
                     data=json.dumps(action).encode(),
                     headers={'Content-Type': 'application/json', 'X-Session-Id': sid},
                     method='POST')
                 with opener.open(req, timeout=60) as r:
                     result = json.loads(r.read().decode())
             else:
-                result, _ = _post(opener, f"{SPACE_URL}/step", action)
+                result, _ = _post(opener, f"{base_url}/step", action)
 
             reward_obj = result.get('reward', 0.0)
             if isinstance(reward_obj, dict):
@@ -84,7 +111,7 @@ def run_task(task_id, seed, run_id):
             print(f"[STEP] run_id={_safe(run_id)} task_id={_safe(task_id)} step={i} action_type={_safe(action['action_type'])} reward={reward:.6f} done={'true' if done else 'false'} status=ok", flush=True)
             if done:
                 break
-        except Exception as e:
+        except Exception:
             print(f"[STEP] run_id={_safe(run_id)} task_id={_safe(task_id)} step={i} action_type={_safe(action['action_type'])} reward=0.000000 done=false status=error", flush=True)
     return score
 
@@ -93,20 +120,21 @@ def main():
     run_id = f"meddataops-{int(time.monotonic())}"
     start = time.monotonic()
     task_ids = [t['id'] for t in TASKS]
+    base_url = find_working_url()
 
     print(f"[START] run_id={_safe(run_id)} ts_utc={_safe(_ts())} model={_safe(MODEL_NAME)} tasks={_safe(','.join(task_ids))} max_steps_per_task=20", flush=True)
 
     # Wait for server to be ready
-    for _ in range(30):
+    for _ in range(60):
         try:
-            urllib.request.urlopen(f"{SPACE_URL}/health", timeout=2)
+            urllib.request.urlopen(f"{base_url}/health", timeout=5)
             break
-        except:
+        except Exception:
             time.sleep(1)
 
     results = []
     for task in TASKS:
-        score = run_task(task['id'], task['seed'], run_id)
+        score = run_task(task['id'], task['seed'], run_id, base_url)
         results.append((task['id'], score))
 
     mean_score = sum(s for _, s in results) / max(1, len(results))
@@ -115,9 +143,18 @@ def main():
     print(f"[END] run_id={_safe(run_id)} ts_utc={_safe(_ts())} task_count={len(results)} mean_score={mean_score:.6f} total_elapsed_s={total:.3f} statuses={_safe(statuses)}", flush=True)
 
 
-if __name__ == "__main__":
-    try:
+def _entrypoint() -> None:
+    if __name__ == "__main__":
         main()
-    except Exception as e:
-        print(f"[END] run_id=fallback ts_utc={_safe(_ts())} task_count=0 mean_score=0.000000 total_elapsed_s=0.000 statuses=error", flush=True)
-        sys.exit(0)
+
+
+try:
+    _entrypoint()
+except SystemExit:
+    raise
+except Exception:
+    try:
+        print("[END] run_id=fallback ts_utc=na task_count=0 mean_score=0.000000 total_elapsed_s=0.000 statuses=error", flush=True)
+    except Exception:
+        pass
+    sys.exit(0)
