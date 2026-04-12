@@ -112,10 +112,13 @@ def _wait_for_server(base_url: str, timeout: int = 60) -> bool:
     return False
 
 
-def run_task(base_url: str, task_id: str, seed: int, run_id: str) -> float:
+def run_task(base_url: str, task_id: str, seed: int, run_id: str) -> dict:
     cookie_jar = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
     urllib.request.install_opener(opener)
+
+    steps = 0
+    status = "ok"
 
     try:
         _obs, sid = _http_post(f"{base_url}/reset", {"task_id": task_id, "seed": seed})
@@ -124,7 +127,7 @@ def run_task(base_url: str, task_id: str, seed: int, run_id: str) -> float:
             f"[STEP] run_id={_safe(run_id)} task_id={_safe(task_id)} step=0 action_type=reset reward=0.000000 done=true status=reset_failed",
             flush=True,
         )
-        return 0.0
+        return {"task_id": task_id, "steps": 0, "score": 0.0, "status": "reset_failed"}
 
     actions = DETERMINISTIC_ACTIONS.get(task_id, [{"action_type": "submit", "parameters": {}}])
     score = 0.0
@@ -133,6 +136,7 @@ def run_task(base_url: str, task_id: str, seed: int, run_id: str) -> float:
             result, new_sid = _http_post(f"{base_url}/step", action, session_id=sid)
             if new_sid:
                 sid = new_sid
+            steps = i
             reward_raw = result.get("reward", 0.0)
             if isinstance(reward_raw, dict):
                 reward = float(reward_raw.get("total", reward_raw.get("value", 0.0)))
@@ -147,11 +151,13 @@ def run_task(base_url: str, task_id: str, seed: int, run_id: str) -> float:
             if done:
                 break
         except Exception:
+            steps = i
+            status = "error"
             print(
                 f"[STEP] run_id={_safe(run_id)} task_id={_safe(task_id)} step={i} action_type={_safe(action['action_type'])} reward=0.000000 done=false status=error",
                 flush=True,
             )
-    return score
+    return {"task_id": task_id, "steps": steps, "score": score, "status": status}
 
 
 def main() -> None:
@@ -178,13 +184,21 @@ def main() -> None:
     if "localhost" in base_url or "127.0.0.1" in base_url:
         _wait_for_server(base_url, timeout=60)
 
-    results: list[tuple[str, float]] = []
+    results: list[dict] = []
     for task in TASKS:
-        score = run_task(base_url, task["id"], int(task["seed"]), run_id)
-        results.append((task["id"], score))
+        result = run_task(base_url, task["id"], int(task["seed"]), run_id)
+        results.append(result)
 
-    mean_score = sum(score for _, score in results) / max(1, len(results))
-    statuses = ",".join(f"{task_id}:ok" for task_id, _ in results)
+    print("task | steps | score | status", flush=True)
+    print("--- | ---: | ---: | ---", flush=True)
+    for result in results:
+        print(
+            f"{result['task_id']} | {int(result['steps'])} | {float(result['score']):.4f} | {result['status']}",
+            flush=True,
+        )
+
+    mean_score = sum(float(result["score"]) for result in results) / max(1, len(results))
+    statuses = ",".join(f"{result['task_id']}:{result['status']}" for result in results)
     total = time.monotonic() - start
     print(
         f"[END] run_id={_safe(run_id)} ts_utc={_safe(_ts())} task_count={len(results)} mean_score={mean_score:.6f} total_elapsed_s={total:.3f} statuses={_safe(statuses)}",
