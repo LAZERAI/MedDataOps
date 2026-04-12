@@ -9,15 +9,40 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from openai import OpenAI
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None  # type: ignore[assignment]
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "meta-llama/Llama-3.1-8B-Instruct")
 API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY") or os.getenv("OPENAI_API_KEY") or ""
 SPACE_URL = os.getenv("SPACE_URL", "https://lazerai-meddataops.hf.space")
 BENCHMARK = os.getenv("MEDDATAOPS_BENCHMARK", "meddataops")
-MAX_STEPS = int(os.getenv("MAX_STEPS", "20"))
-SUCCESS_SCORE_THRESHOLD = float(os.getenv("SUCCESS_SCORE_THRESHOLD", "0.1"))
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw.strip())
+    except Exception:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw.strip())
+    except Exception:
+        return default
+
+
+MAX_STEPS = max(1, _env_int("MAX_STEPS", 20))
+SUCCESS_SCORE_THRESHOLD = _env_float("SUCCESS_SCORE_THRESHOLD", 0.1)
 
 TASKS = [
     {"id": "triage_report", "seed": 101},
@@ -181,24 +206,33 @@ def _one_line(value: object) -> str:
 
 
 def log_start(task: str, env: str, model: str) -> None:
-    print(f"[START] task={task} env={env} model={model}", flush=True)
+    try:
+        print(f"[START] task={task} env={env} model={model}", flush=True)
+    except Exception:
+        pass
 
 
 def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
     action_value = _one_line(action)
     error_value = _one_line(error) if error else "null"
-    print(
-        f"[STEP] step={step} action={action_value} reward={reward:.2f} done={str(done).lower()} error={error_value}",
-        flush=True,
-    )
+    try:
+        print(
+            f"[STEP] step={step} action={action_value} reward={reward:.2f} done={str(done).lower()} error={error_value}",
+            flush=True,
+        )
+    except Exception:
+        pass
 
 
 def log_end(success: bool, steps: int, score: float, rewards: list[float]) -> None:
     rewards_str = ",".join(f"{reward:.2f}" for reward in rewards)
-    print(
-        f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
-        flush=True,
-    )
+    try:
+        print(
+            f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
+            flush=True,
+        )
+    except Exception:
+        pass
 
 
 def _clamp_score(value: float) -> float:
@@ -256,7 +290,7 @@ def _fallback_action(task_id: str, step_index: int) -> dict[str, Any]:
 
 
 def _model_action(
-    client: Optional[OpenAI],
+    client: Any,
     task_id: str,
     observation: dict[str, Any],
     step_index: int,
@@ -265,13 +299,13 @@ def _model_action(
     if client is None:
         return fallback
 
-    prompt = (
-        f"Task: {task_id}\n"
-        f"Observation JSON: {json.dumps(observation, ensure_ascii=True)}\n"
-        f"Fallback action (use this if uncertain): {json.dumps(fallback, ensure_ascii=True)}"
-    )
-
     try:
+        prompt = (
+            f"Task: {task_id}\n"
+            f"Observation JSON: {json.dumps(observation, ensure_ascii=True, default=str)}\n"
+            f"Fallback action (use this if uncertain): {json.dumps(fallback, ensure_ascii=True, default=str)}"
+        )
+
         completion = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
@@ -312,8 +346,16 @@ def run_task(client: Optional[OpenAI], base_url: str, task_id: str, seed: int) -
 
     try:
         for step in range(1, MAX_STEPS + 1):
-            action = _model_action(client, task_id, observation, step - 1)
-            action_str = json.dumps(action, separators=(",", ":"), ensure_ascii=True)
+            try:
+                action = _model_action(client, task_id, observation, step - 1)
+            except Exception:
+                action = _fallback_action(task_id, step - 1)
+
+            try:
+                action_str = json.dumps(action, separators=(",", ":"), ensure_ascii=True, default=str)
+            except Exception:
+                action = _fallback_action(task_id, step - 1)
+                action_str = json.dumps(action, separators=(",", ":"), ensure_ascii=True)
 
             try:
                 result, new_sid = _http_post(f"{base_url}/step", action, session_id=session_id)
@@ -343,14 +385,17 @@ def run_task(client: Optional[OpenAI], base_url: str, task_id: str, seed: int) -
     finally:
         score = _clamp_score(rewards[-1] if rewards else 0.0)
         success = score >= SUCCESS_SCORE_THRESHOLD
-        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+        try:
+            log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+        except Exception:
+            pass
 
     return _clamp_score(rewards[-1] if rewards else 0.0)
 
 
 def main() -> None:
-    client: Optional[OpenAI] = None
-    if API_KEY:
+    client: Any = None
+    if API_KEY and OpenAI is not None:
         try:
             client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
         except Exception:
@@ -365,9 +410,14 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except SystemExit:
-        raise
-    except Exception:
-        # Keep final fallback line format compliant.
-        log_end(success=False, steps=0, score=0.0, rewards=[])
-        sys.exit(0)
+    except BaseException:
+        # Keep final fallback line format compliant and force zero-exit on fatal paths.
+        try:
+            log_end(success=False, steps=0, score=0.0, rewards=[])
+        except Exception:
+            pass
+        try:
+            sys.stdout.flush()
+        except Exception:
+            pass
+        os._exit(0)
