@@ -27,7 +27,7 @@ def _env_int(name: str, default: int) -> int:
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("API_KEY") or os.getenv("OPENAI_API_KEY") or ""
-ENV_URL = os.getenv("ENV_URL", "https://lazerai-meddataops.hf.space").rstrip("/")
+ENV_URL = os.getenv("ENV_URL", "http://localhost:7860").rstrip("/")
 
 MAX_STEPS = max(1, _env_int("MAX_STEPS_PER_TASK", _env_int("MAX_STEPS", 20)))
 SUCCESS_THRESHOLD = 0.5
@@ -366,22 +366,32 @@ def run_task(env: EnvClient, llm: Any, task_id: str, seed: int) -> tuple[float, 
 
 
 def main() -> None:
-    llm = None
-    if HF_TOKEN and OpenAI is not None:
-        try:
-            llm = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
-        except Exception:
-            llm = None
+    try:
+        llm = None
+        if HF_TOKEN and OpenAI is not None:
+            try:
+                llm = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+            except Exception:
+                llm = None
 
-    base_url = _choose_env_url()
-    env = EnvClient(base_url)
+        base_url = _choose_env_url()
+        env = EnvClient(base_url)
 
-    for task_entry in TASKS:
-        task_id = str(task_entry.get("id", ""))
-        seed = int(task_entry.get("seed", 0))
-        try:
-            run_task(env, llm, task_id, seed)
-        except Exception:
+        for task_entry in TASKS:
+            task_id = str(task_entry.get("id", ""))
+            try:
+                seed = int(task_entry.get("seed", 0))
+            except Exception:
+                seed = 0
+            try:
+                run_task(env, llm, task_id, seed)
+            except Exception:
+                log_start(task=task_id, env="meddataops", model=MODEL_NAME)
+                log_end(success=False, steps=0, score=0.0, rewards=[])
+    except BaseException:
+        for task_entry in TASKS:
+            task_id = str(task_entry.get("id", ""))
+            log_start(task=task_id, env="meddataops", model=MODEL_NAME)
             log_end(success=False, steps=0, score=0.0, rewards=[])
 
 
