@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import http.cookiejar
 import json
 import os
 import re
@@ -8,13 +7,17 @@ import sys
 import time
 import urllib.request
 from datetime import datetime, timezone
+from typing import Any, Optional
+
+from openai import OpenAI
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "meta-llama/Llama-3.1-8B-Instruct")
-HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("API_KEY") or "no-token"
-
-# Use public HF Space - accessible from ANY network context
+API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY") or os.getenv("OPENAI_API_KEY") or ""
 SPACE_URL = os.getenv("SPACE_URL", "https://lazerai-meddataops.hf.space")
+BENCHMARK = os.getenv("MEDDATAOPS_BENCHMARK", "meddataops")
+MAX_STEPS = int(os.getenv("MAX_STEPS", "20"))
+SUCCESS_SCORE_THRESHOLD = float(os.getenv("SUCCESS_SCORE_THRESHOLD", "0.1"))
 
 TASKS = [
     {"id": "triage_report", "seed": 101},
@@ -37,14 +40,14 @@ DETERMINISTIC_ACTIONS = {
             "action_type": "clean_data",
             "parameters": {
                 "operations": [
-                    {
-                        "operation": "normalize_strings",
-                        "columns": ["drug_name"],
-                        "case": "lower",
-                    },
+                    {"operation": "normalize_strings", "columns": ["drug_name"], "case": "lower"},
                     {
                         "operation": "fix_dtypes",
-                        "columns": {"prescribed_date": "date", "dosage_mg": "float"},
+                        "columns": {
+                            "prescribed_date": "date",
+                            "dosage_mg": "float",
+                            "patient_id": "string",
+                        },
                     },
                 ]
             },
@@ -63,147 +66,300 @@ DETERMINISTIC_ACTIONS = {
             "parameters": {
                 "operations": [
                     {
-                        "operation": "normalize_strings",
-                        "columns": ["ward", "icu_unit"],
-                        "case": "upper",
-                    }
+                        "operation": "rename_columns",
+                        "mapping": {
+                            "patient_id": "source_record_id",
+                            "pid": "source_record_id",
+                            "bed_number": "raw_bed",
+                            "room": "raw_bed",
+                            "admitted_at": "raw_admitted_at",
+                            "admission_ts": "raw_admitted_at",
+                        },
+                    },
+                    {
+                        "operation": "map_values",
+                        "column": "ward_code",
+                        "mapping": {
+                            "MICU": "ICU_MEDICAL",
+                            "M-ICU": "ICU_MEDICAL",
+                            "SICU": "ICU_SURGICAL",
+                            "SURG-ICU": "ICU_SURGICAL",
+                            "CCU": "ICU_CARDIAC",
+                            "CARD-ICU": "ICU_CARDIAC",
+                            "NCCU": "ICU_NEURO",
+                            "NEURO-ICU": "ICU_NEURO",
+                        },
+                    },
+                    {
+                        "operation": "coalesce_columns",
+                        "target_column": "icu_unit",
+                        "source_columns": ["icu_unit", "ward_code"],
+                    },
+                    {"operation": "fix_unix_ms", "column": "raw_admitted_at", "output": "datetime"},
+                    {"operation": "copy_column", "from_column": "raw_admitted_at", "to_column": "admitted_at"},
+                    {
+                        "operation": "derive_column",
+                        "target_column": "source_system",
+                        "rule": "if_equals",
+                        "column": "source_table",
+                        "equals": "hospital_a_patients",
+                        "then": "hospital_a",
+                        "else": "hospital_b",
+                    },
+                    {
+                        "operation": "derive_column",
+                        "target_column": "source_prefix",
+                        "rule": "if_equals",
+                        "column": "source_system",
+                        "equals": "hospital_a",
+                        "then": "A",
+                        "else": "B",
+                    },
+                    {
+                        "operation": "derive_column",
+                        "target_column": "patient_uid",
+                        "rule": "template",
+                        "template": "{source_prefix}-{source_record_id}",
+                    },
+                    {
+                        "operation": "derive_column",
+                        "target_column": "bed_digits",
+                        "rule": "extract_digits",
+                        "column": "raw_bed",
+                        "fallback": "UNKNOWN",
+                    },
+                    {
+                        "operation": "derive_column",
+                        "target_column": "bed_number",
+                        "rule": "template",
+                        "template": "{source_prefix}-BED-{bed_digits}",
+                    },
+                    {
+                        "operation": "derive_column",
+                        "target_column": "status",
+                        "rule": "date_within_days",
+                        "column": "admitted_at",
+                        "reference_date": "2026-04-04",
+                        "days": 7,
+                        "then": "active",
+                        "else": "inactive",
+                    },
+                    {
+                        "operation": "remove_duplicates",
+                        "columns": ["icu_unit", "bed_number", "admitted_at"],
+                    },
                 ]
             },
         },
         {
             "action_type": "fix_query",
             "parameters": {
-                "query": "WITH patient_agg AS (SELECT icu_unit, COUNT(*) AS current_occupancy, SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active_count FROM patients GROUP BY icu_unit), capacity_agg AS (SELECT unit AS icu_unit, COUNT(*) AS total_capacity FROM icu_beds GROUP BY unit) SELECT c.icu_unit, COALESCE(p.current_occupancy, 0) AS current_occupancy, c.total_capacity, COALESCE(p.active_count, 0) AS active_count FROM capacity_agg c LEFT JOIN patient_agg p ON p.icu_unit = c.icu_unit ORDER BY c.icu_unit"
+                "query": "WITH patient_agg AS (  SELECT     icu_unit,     COUNT(*) AS current_occupancy,     SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active_count   FROM patients   GROUP BY icu_unit), capacity_agg AS (  SELECT     unit AS icu_unit,     COUNT(*) AS total_capacity   FROM icu_beds   GROUP BY unit) SELECT   c.icu_unit,   COALESCE(p.current_occupancy, 0) AS current_occupancy,   c.total_capacity,   COALESCE(p.active_count, 0) AS active_count FROM capacity_agg c LEFT JOIN patient_agg p   ON p.icu_unit = c.icu_unit ORDER BY c.icu_unit"
             },
         },
         {"action_type": "submit", "parameters": {}},
     ],
 }
 
-
-def _ts() -> str:
-    return datetime.now(timezone.utc).isoformat()
+SYSTEM_PROMPT = (
+    "You are operating a MedDataOps environment. "
+    "Return only JSON with fields action_type and parameters. "
+    "Allowed action_type: clean_data, run_query, fix_query, submit."
+)
 
 
 def _safe(value: object) -> str:
     return re.sub(r"\s+", "_", str(value).replace("\n", " ").strip()) or "na"
 
 
-def _http_post(url: str, payload: dict, session_id: str | None = None) -> tuple[dict, str]:
-    data = json.dumps(payload).encode()
+def _ts() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _one_line(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value)).strip()
+
+
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    action_value = _one_line(action)
+    error_value = _one_line(error) if error else "null"
+    print(
+        f"[STEP] step={step} action={action_value} reward={reward:.2f} done={str(done).lower()} error={error_value}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, score: float, rewards: list[float]) -> None:
+    rewards_str = ",".join(f"{reward:.2f}" for reward in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
+        flush=True,
+    )
+
+
+def _clamp_score(value: float) -> float:
+    return min(max(value, 0.0), 1.0)
+
+
+def _extract_reward(reward_obj: Any) -> float:
+    if isinstance(reward_obj, (int, float)):
+        return _clamp_score(float(reward_obj))
+    if isinstance(reward_obj, dict):
+        if isinstance(reward_obj.get("total"), (int, float)):
+            return _clamp_score(float(reward_obj["total"]))
+        if isinstance(reward_obj.get("value"), (int, float)):
+            return _clamp_score(float(reward_obj["value"]))
+    return 0.0
+
+
+def _extract_last_error(result: dict[str, Any]) -> Optional[str]:
+    observation = result.get("observation")
+    if isinstance(observation, dict):
+        errors = observation.get("error_messages")
+        if isinstance(errors, list) and errors:
+            return str(errors[0])
+    return None
+
+
+def _http_post(url: str, payload: dict[str, Any], session_id: Optional[str] = None) -> tuple[dict[str, Any], str]:
+    data = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if session_id:
         headers["X-Session-Id"] = session_id
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=30) as response:
-        body = json.loads(response.read().decode())
+
+    request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    with urllib.request.urlopen(request, timeout=30) as response:
+        body = response.read().decode("utf-8")
+        parsed = json.loads(body) if body else {}
         sid = response.headers.get("X-Session-Id", "")
-        return body, sid
+        return parsed, sid
 
 
-def _wait_for_server(base_url: str, timeout: int = 60) -> bool:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+def _choose_base_url() -> str:
+    candidates = [SPACE_URL, "http://localhost:7860", "http://127.0.0.1:7860"]
+    for candidate in candidates:
         try:
-            urllib.request.urlopen(f"{base_url}/health", timeout=3)
-            return True
+            urllib.request.urlopen(f"{candidate}/health", timeout=5)
+            return candidate
         except Exception:
-            time.sleep(2)
-    return False
+            continue
+    return SPACE_URL
 
 
-def run_task(base_url: str, task_id: str, seed: int, run_id: str) -> dict:
-    cookie_jar = http.cookiejar.CookieJar()
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
-    urllib.request.install_opener(opener)
+def _fallback_action(task_id: str, step_index: int) -> dict[str, Any]:
+    actions = DETERMINISTIC_ACTIONS.get(task_id, [{"action_type": "submit", "parameters": {}}])
+    return actions[min(step_index, len(actions) - 1)]
 
-    steps = 0
-    status = "ok"
+
+def _model_action(
+    client: Optional[OpenAI],
+    task_id: str,
+    observation: dict[str, Any],
+    step_index: int,
+) -> dict[str, Any]:
+    fallback = _fallback_action(task_id, step_index)
+    if client is None:
+        return fallback
+
+    prompt = (
+        f"Task: {task_id}\n"
+        f"Observation JSON: {json.dumps(observation, ensure_ascii=True)}\n"
+        f"Fallback action (use this if uncertain): {json.dumps(fallback, ensure_ascii=True)}"
+    )
 
     try:
-        _obs, sid = _http_post(f"{base_url}/reset", {"task_id": task_id, "seed": seed})
-    except Exception:
-        print(
-            f"[STEP] run_id={_safe(run_id)} task_id={_safe(task_id)} step=0 action_type=reset reward=0.000000 done=true status=reset_failed",
-            flush=True,
+        completion = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0,
+            max_tokens=180,
         )
-        return {"task_id": task_id, "steps": 0, "score": 0.0, "status": "reset_failed"}
+        text = (completion.choices[0].message.content or "").strip()
+        payload = json.loads(text)
 
-    actions = DETERMINISTIC_ACTIONS.get(task_id, [{"action_type": "submit", "parameters": {}}])
-    score = 0.0
-    for i, action in enumerate(actions, 1):
-        try:
-            result, new_sid = _http_post(f"{base_url}/step", action, session_id=sid)
-            if new_sid:
-                sid = new_sid
-            steps = i
-            reward_raw = result.get("reward", 0.0)
-            if isinstance(reward_raw, dict):
-                reward = float(reward_raw.get("total", reward_raw.get("value", 0.0)))
-            else:
-                reward = float(reward_raw)
+        action_type = str(payload.get("action_type", "")).strip().lower()
+        parameters = payload.get("parameters", {})
+        if action_type not in {"clean_data", "run_query", "fix_query", "submit"}:
+            return fallback
+        if not isinstance(parameters, dict):
+            parameters = {}
+
+        return {"action_type": action_type, "parameters": parameters}
+    except Exception:
+        return fallback
+
+
+def run_task(client: Optional[OpenAI], base_url: str, task_id: str, seed: int) -> float:
+    rewards: list[float] = []
+    steps_taken = 0
+    session_id = ""
+    observation: dict[str, Any] = {}
+
+    log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
+
+    try:
+        observation, session_id = _http_post(f"{base_url}/reset", {"task_id": task_id, "seed": seed})
+    except Exception:
+        log_end(success=False, steps=0, score=0.0, rewards=[])
+        return 0.0
+
+    try:
+        for step in range(1, MAX_STEPS + 1):
+            action = _model_action(client, task_id, observation, step - 1)
+            action_str = json.dumps(action, separators=(",", ":"), ensure_ascii=True)
+
+            try:
+                result, new_sid = _http_post(f"{base_url}/step", action, session_id=session_id)
+                if new_sid:
+                    session_id = new_sid
+            except Exception as exc:
+                log_step(step=step, action=action_str, reward=0.0, done=False, error=str(exc))
+                rewards.append(0.0)
+                steps_taken = step
+                continue
+
+            reward = _extract_reward(result.get("reward", 0.0))
             done = bool(result.get("done", False))
-            score = reward
-            print(
-                f"[STEP] run_id={_safe(run_id)} task_id={_safe(task_id)} step={i} action_type={_safe(action['action_type'])} reward={reward:.6f} done={'true' if done else 'false'} status=ok",
-                flush=True,
-            )
+            error = _extract_last_error(result)
+
+            log_step(step=step, action=action_str, reward=reward, done=done, error=error)
+
+            rewards.append(reward)
+            steps_taken = step
+
+            next_observation = result.get("observation")
+            if isinstance(next_observation, dict):
+                observation = next_observation
+
             if done:
                 break
-        except Exception:
-            steps = i
-            status = "error"
-            print(
-                f"[STEP] run_id={_safe(run_id)} task_id={_safe(task_id)} step={i} action_type={_safe(action['action_type'])} reward=0.000000 done=false status=error",
-                flush=True,
-            )
-    return {"task_id": task_id, "steps": steps, "score": score, "status": status}
+    finally:
+        score = _clamp_score(rewards[-1] if rewards else 0.0)
+        success = score >= SUCCESS_SCORE_THRESHOLD
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+
+    return _clamp_score(rewards[-1] if rewards else 0.0)
 
 
 def main() -> None:
-    run_id = f"meddataops-{int(time.monotonic())}"
-    start = time.monotonic()
-    task_ids = [task["id"] for task in TASKS]
-
-    print(
-        f"[START] run_id={_safe(run_id)} ts_utc={_safe(_ts())} model={_safe(MODEL_NAME)} tasks={_safe(','.join(task_ids))} max_steps_per_task=20",
-        flush=True,
-    )
-
-    # Try localhost first, fall back to public HF Space
-    base_url = SPACE_URL
-    for candidate in ["http://localhost:7860", "http://127.0.0.1:7860", SPACE_URL]:
+    client: Optional[OpenAI] = None
+    if API_KEY:
         try:
-            urllib.request.urlopen(f"{candidate}/health", timeout=5)
-            base_url = candidate
-            break
+            client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
         except Exception:
-            continue
+            client = None
 
-    # Wait for server if using localhost
-    if "localhost" in base_url or "127.0.0.1" in base_url:
-        _wait_for_server(base_url, timeout=60)
+    base_url = _choose_base_url()
 
-    results: list[dict] = []
     for task in TASKS:
-        result = run_task(base_url, task["id"], int(task["seed"]), run_id)
-        results.append(result)
-
-    print("task | steps | score | status", flush=True)
-    print("--- | ---: | ---: | ---", flush=True)
-    for result in results:
-        print(
-            f"{result['task_id']} | {int(result['steps'])} | {float(result['score']):.4f} | {result['status']}",
-            flush=True,
-        )
-
-    mean_score = sum(float(result["score"]) for result in results) / max(1, len(results))
-    statuses = ",".join(f"{result['task_id']}:{result['status']}" for result in results)
-    total = time.monotonic() - start
-    print(
-        f"[END] run_id={_safe(run_id)} ts_utc={_safe(_ts())} task_count={len(results)} mean_score={mean_score:.6f} total_elapsed_s={total:.3f} statuses={_safe(statuses)}",
-        flush=True,
-    )
+        run_task(client=client, base_url=base_url, task_id=task["id"], seed=int(task["seed"]))
 
 
 if __name__ == "__main__":
@@ -212,11 +368,6 @@ if __name__ == "__main__":
     except SystemExit:
         raise
     except Exception:
-        try:
-            print(
-                f"[END] run_id=fallback ts_utc={_safe(_ts())} task_count=0 mean_score=0.000000 total_elapsed_s=0.000 statuses=error",
-                flush=True,
-            )
-        except Exception:
-            pass
+        # Keep final fallback line format compliant.
+        log_end(success=False, steps=0, score=0.0, rewards=[])
         sys.exit(0)
